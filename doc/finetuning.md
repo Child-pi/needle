@@ -29,9 +29,11 @@ Rules that matter:
 Train, export, load:
 
 ```sh
-needle finetune data.jsonl --epochs 10 --out adapter.pkl
-needle build checkpoints/needle2.pkl --lora adapter.pkl --out tuned.cact
+needle finetune data.jsonl --epochs 10 --out adapter.safetensors
+needle build checkpoints/needle2.pkl --lora adapter.safetensors --out tuned.cact
 ```
+
+Checkpoints and adapters are `.safetensors`; the Needle 2 base shipped as `checkpoints/needle2.pkl` and pickle files still load.
 
 ```python
 agent = needle.Needle(tools=[...], weights="tuned.cact")

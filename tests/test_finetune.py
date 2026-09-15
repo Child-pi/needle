@@ -153,3 +153,27 @@ def test_finetune_adapter_records_realized_seed(tiny_checkpoint, tmp_path):
     with out.open("rb") as handle:
         adapter = pickle.load(handle)
     assert adapter["seed"] == 17
+
+
+def test_finetune_adapter_defaults_to_safetensors_and_builds(tiny_checkpoint_safetensors, tmp_path):
+    from needle.model.finetune import finetune_local, build_main
+    from needle.model.checkpoints import read_adapter
+    from needle.model.export import read_export
+
+    data = tmp_path / "data.jsonl"
+    _write_data(data)
+    args = _finetune_args(data, tiny_checkpoint_safetensors, "", tmp_path / "ck")
+    args.out = None
+    finetune_local(args)
+    adapter_path = tmp_path / "ck" / "needle_lora.safetensors"
+    assert adapter_path.exists()
+    adapter = read_adapter(adapter_path)
+    assert adapter["rank"] == 4 and abs(adapter["scale"] - 2.0) < 1e-6
+    assert adapter["base"] == tiny_checkpoint_safetensors
+    assert adapter["lora"] and all("A" in v and "B" in v for v in adapter["lora"].values())
+
+    out = str(tmp_path / "merged_st.cact")
+    build_main(types.SimpleNamespace(checkpoint=tiny_checkpoint_safetensors,
+                                     lora=str(adapter_path), out=out, upload=False, bits="4"))
+    header, _ = read_export(out)
+    assert header["num_tensors"] > 0

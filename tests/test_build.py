@@ -57,3 +57,21 @@ def test_export_round_trips_a_projection(tiny_checkpoint, tmp_path):
     dequant = tensors[2]
     assert dequant.shape == original.shape
     assert np.corrcoef(dequant.ravel(), original.ravel())[0, 1] > 0.9
+
+
+def test_build_from_safetensors_checkpoint(tiny_checkpoint, tiny_checkpoint_safetensors, tmp_path):
+    from needle.model.finetune import build_main
+    from needle.model.export import read_export
+    from needle.model.run import load_checkpoint
+    import numpy as np
+    import jax
+
+    a, cfg_a = load_checkpoint(tiny_checkpoint)
+    b, cfg_b = load_checkpoint(tiny_checkpoint_safetensors)
+    assert vars(cfg_a) == vars(cfg_b)
+    assert all(np.array_equal(np.asarray(x), np.asarray(y))
+               for x, y in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)))
+    out = str(tmp_path / "from_safetensors.cact")
+    build_main(_build_args(tiny_checkpoint_safetensors, out, bits="4"))
+    header, _ = read_export(out)
+    assert header["num_tensors"] > 0

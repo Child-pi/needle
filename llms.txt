@@ -124,7 +124,7 @@ if r["type"] == "call":
 
 ## Confidence gating
 
-`confidence` is the min of a post-hoc calibration head and the decode probability of the call. Calibration holds for the base model only: an agent constructed with `weights=` reports `confidence` as None (fine-tuning does not update the head). Pick a threshold per product; act at/above it, escalate below it (`escalate` in the response applies the engine default of 0.15):
+`confidence` is the min of a post-hoc calibration head and the decode probability of the call. Calibration holds for the base model only: an agent constructed with `weights=` reports `confidence` as None (fine-tuning does not update the head). Pick a threshold per product; act at/above it, escalate below it (`escalate` in the response applies the engine default of 0.1):
 
 ```python
 r = agent.complete(user_text)
@@ -166,7 +166,7 @@ pip install "cactus-needle[train]"                                              
 export OPENROUTER_API_KEY=sk-or-...
 needle generate-data --tools my_tools.json --num-samples 500 --output data.jsonl   # optional
 needle finetune data.jsonl --epochs 3 --generate 300                                # LoRA; auto-downloads base
-needle build checkpoints/needle2.pkl --lora checkpoints/needle_lora.pkl --out my.cact
+needle build checkpoints/needle2.pkl --lora checkpoints/needle_lora.safetensors --out my.cact
 ```
 
 Run a tuned model - the engine is weights-agnostic:
@@ -176,7 +176,7 @@ agent = needle.Needle(weights="my.cact", tools=[...])
 agent.run("...")
 ```
 
-Options: `finetune --lora-rank 16 --lora-alpha 32 --lr 1e-4 --batch-size 16 --max-len 1024 --val-split 0.1 --checkpoint <base.pkl> --checkpoint-dir <dir> --out <adapter.pkl> --generate <n> --model <id> --workers <n>`; `--model` defaults to `deepseek/deepseek-v4-flash`, `--workers` defaults to `8`, and `--checkpoint-dir` defaults to `checkpoints`. `--generate` synthesizes extra examples through the configured OpenRouter endpoint before training. `build --bits 2|4 --upload` (with `NEEDLE_HF_REPO=<you>/<model>`).
+Options: `finetune --lora-rank 16 --lora-alpha 32 --lr 1e-4 --batch-size 16 --max-len 1024 --val-split 0.1 --checkpoint <base.safetensors or .pkl> --checkpoint-dir <dir> --out <adapter.safetensors or .pkl> --generate <n> --model <id> --workers <n>`; `--model` defaults to `deepseek/deepseek-v4-flash`, `--workers` defaults to `8`, and `--checkpoint-dir` defaults to `checkpoints`. `--generate` synthesizes extra examples through the configured OpenRouter endpoint before training. `build --bits 2|4 --upload` (with `NEEDLE_HF_REPO=<you>/<model>`).
 
 ## Playground (browser)
 
@@ -200,7 +200,7 @@ Adapt by swapping the Literal values for your own and keeping the shapes: closed
 
 ## CLI summary
 
-- `needle run --checkpoint <base.pkl> --query "..." --tools tools.json` - JAX reference inference from a checkpoint (dev path; normal inference is the Python `Needle` API above).
+- `needle run --checkpoint <base.safetensors or .pkl> --query "..." --tools tools.json` - JAX reference inference from a checkpoint (dev path; normal inference is the Python `Needle` API above).
 - `needle generate-data` / `needle finetune` / `needle build` - the fine-tuning pipeline.
 - `needle playground` - browser UI.
 - `needle fetch [--platform-tag <tag>] [--out <dir>]` - pre-download the inference engine for this machine (or another platform) into the cache; prints the path. For air-gapped devices, also see `NEEDLE_LIB_PATH` and `HF_HUB_OFFLINE` in doc/apis.md.
@@ -212,7 +212,8 @@ Adapt by swapping the Literal values for your own and keeping the shapes: closed
 - Do not read `arguments` keys that were not evidenced in the input; optional fields may be absent.
 - Do not create one `Needle` per turn for a conversation; reuse the instance so context carries. New tools = new instance.
 - `import needle` does not import JAX; only `needle finetune`/`build` do.
-- `weights=` expects a `.cact` (from `needle build`), not a `.pkl` checkpoint.
+- `weights=` expects a `.cact` (from `needle build`), not a `.safetensors` or `.pkl` checkpoint.
+- Checkpoints and adapters are `.safetensors`; only the Needle 2 base shipped as a `.pkl`, and both formats load.
 - The engine cannot unload weights: once a tuned `.cact` is bound, constructing or calling a base-model agent raises instead of silently answering with those weights. Construct agents that want the base model before any tuned one, or run them in separate processes.
 
 ## Telemetry

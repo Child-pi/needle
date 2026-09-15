@@ -1,7 +1,8 @@
 import concurrent.futures
 import json
 import os
-import pickle
+
+from .checkpoints import read_adapter, write_adapter
 import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -426,18 +427,17 @@ def finetune_local(args, progress=None):
             emit(f"  {'epoch':<9} {epoch + 1}/{args.epochs}  loss {last:.4f}")
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-    out = args.out or os.path.join(args.checkpoint_dir, "needle_lora.pkl")
-    with open(out, "wb") as handle:
-        pickle.dump({
-            "lora": {"/".join(p): {"A": np.asarray(v["A"]), "B": np.asarray(v["B"])}
-                     for p, v in lora.items()},
-            "scale": float(scale),
-            "base": base_path,
-            "rank": args.lora_rank,
-            "qat_bits": qat_bits,
-            "qat_bits_map": qat_bits_map,
-            "seed": seed,
-        }, handle)
+    out = args.out or os.path.join(args.checkpoint_dir, "needle_lora.safetensors")
+    write_adapter(out, {
+        "lora": {"/".join(p): {"A": np.asarray(v["A"]), "B": np.asarray(v["B"])}
+                 for p, v in lora.items()},
+        "scale": float(scale),
+        "base": base_path,
+        "rank": args.lora_rank,
+        "qat_bits": qat_bits,
+        "qat_bits_map": qat_bits_map,
+        "seed": seed,
+    })
     print(f"  {'adapter':<9} {out}")
     print(f"  {'next':<9} needle build {base_path} --lora {out}")
     print(f"  {'note':<9} confidence reports None with tuned weights; the head is not tuned")
@@ -454,8 +454,7 @@ def build_main(args):
     adapter_qat_bits = None
     adapter_qat_bits_map = None
     if args.lora:
-        with open(args.lora, "rb") as handle:
-            adapter = pickle.load(handle)
+        adapter = read_adapter(args.lora)
         lora = {tuple(key.split("/")): {"A": jnp.asarray(v["A"]), "B": jnp.asarray(v["B"])}
                 for key, v in adapter["lora"].items()}
         params = merge_lora(params, lora, adapter["scale"])

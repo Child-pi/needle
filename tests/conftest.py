@@ -62,3 +62,12 @@ def tiny_checkpoint(tmp_path_factory):
         pickle.dump({"format_version": 2, "params": params,
                      "config": dict(vars(config))}, handle)
     return str(path)
+
+
+@pytest.fixture(scope="session")
+def tiny_checkpoint_safetensors(tiny_checkpoint, tmp_path_factory):
+    from needle.model.checkpoints import read_checkpoint, write_checkpoint
+
+    path = tmp_path_factory.mktemp("ckpt") / "tiny.safetensors"
+    write_checkpoint(path, read_checkpoint(tiny_checkpoint))
+    return str(path)

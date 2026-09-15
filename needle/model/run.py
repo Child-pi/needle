@@ -1,6 +1,5 @@
 import os
 import json
-import pickle
 import re
 import sys
 
@@ -10,6 +9,7 @@ import numpy as np
 
 from .tokenizer import get_tokenizer, BOS_ID, EOS_ID, PAD_ID
 from .architecture import SimpleAttentionNetwork, TransformerConfig
+from .checkpoints import read_checkpoint, write_checkpoint
 
 CHECKPOINT_FORMAT_VERSION = 2
 BUF_BUCKET = 128
@@ -29,8 +29,7 @@ def average_checkpoints(paths, out):
 
     scale = 1.0 / len(paths)
     for p in paths:
-        with open(p, "rb") as f:
-            ckpt = pickle.load(f)
+        ckpt = read_checkpoint(p)
         if ckpt.get("format_version") != CHECKPOINT_FORMAT_VERSION:
             raise ValueError(f"{p} is not a format-v{CHECKPOINT_FORMAT_VERSION} checkpoint")
         acc = acc if acc is not None else {}
@@ -42,14 +41,13 @@ def average_checkpoints(paths, out):
         return {k: to_fp16(v) if isinstance(v, dict) else v.astype(np.float16)
                 for k, v in t.items()}
 
-    with open(out, "wb") as f:
-        pickle.dump({
-            "format_version": CHECKPOINT_FORMAT_VERSION,
-            "params": to_fp16(acc),
-            "config": meta["config"],
-            "step": meta.get("step"),
-            "run": {**(meta.get("run") or {}), "averaged_from": steps},
-        }, f)
+    write_checkpoint(out, {
+        "format_version": CHECKPOINT_FORMAT_VERSION,
+        "params": to_fp16(acc),
+        "config": meta["config"],
+        "step": meta.get("step"),
+        "run": {**(meta.get("run") or {}), "averaged_from": steps},
+    })
     print(f"Averaged {len(paths)} checkpoints (steps {steps}) -> {out}")
 
 
@@ -72,6 +70,9 @@ def load_checkpoint(path, return_run=False):
         flat = "checkpoints/" + os.path.basename(path)
         if flat not in names:
             names.append(flat)
+        root = os.path.basename(path)
+        if root not in names:
+            names.append(root)
         err = None
         for name in names:
             try:
@@ -81,8 +82,7 @@ def load_checkpoint(path, return_run=False):
                 err = e
         else:
             raise err
-    with open(path, "rb") as f:
-        ckpt = pickle.load(f)
+    ckpt = read_checkpoint(path)
     version = ckpt.get("format_version") if isinstance(ckpt, dict) else None
     if version != CHECKPOINT_FORMAT_VERSION:
         raise ValueError(

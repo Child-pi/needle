@@ -1,3 +1,4 @@
+import pytest
 import argparse
 import json
 
@@ -39,3 +40,21 @@ def test_main_loads_tools_file_and_runs(tiny_checkpoint, tmp_path, capsys):
 
     assert "<tools>" in out
     assert '"name":"f"' in out
+
+
+def test_missing_checkpoint_is_looked_up_under_checkpoints_then_at_the_repo_root(monkeypatch, tmp_path):
+    from huggingface_hub.errors import EntryNotFoundError
+    import huggingface_hub
+    from needle.model import run
+
+    attempted = []
+
+    def fake_download(repo, name, repo_type, local_dir):
+        attempted.append(name)
+        raise EntryNotFoundError("missing")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(EntryNotFoundError):
+        run.load_checkpoint("needle3.safetensors")
+    assert attempted == ["checkpoints/needle3.safetensors", "needle3.safetensors"]
