@@ -21,7 +21,7 @@ Every environment module exposes the same surface:
 | --- | --- |
 | `TOOLS` | The decorated tool functions, each returning `{"ok": True, ...}` echoes of its arguments. |
 | `SYSTEM` | The system prompt the agent is built with. |
-| `agent` | A `needle.Needle(tools=TOOLS, system=SYSTEM)`, constructed lazily on first access so importing never fetches the engine. Construction sets `NEEDLE_STRICT_VALIDATE=1` (if unset) so out-of-bounds calls are suppressed to refusals. |
+| `agent` | A `needle.Needle(tools=TOOLS, system=SYSTEM)`, constructed lazily on first access so importing never fetches the engine. `run_tests` treats a call whose `validation` reports ungrounded values or a negation as a refusal. |
 | `TEST_CASES` | The frozen suite: dicts of `query`, expected `calls`, `category`, and optional `critical`. |
 | `run_tests(min_confidence=0.0, verbose=True)` | Runs the suite against the shipped engine; returns `True` at >=90% pass with zero critical failures. |
 

@@ -1,5 +1,4 @@
 import json
-import os
 
 import needle
 
@@ -9,7 +8,6 @@ _agents = {}
 def agent_for(module):
     key = module.__name__
     if key not in _agents:
-        os.environ.setdefault("NEEDLE_STRICT_VALIDATE", "1")
         _agents[key] = needle.Needle(tools=module.TOOLS, system=module.SYSTEM)
     return _agents[key]
 
@@ -25,6 +23,9 @@ def run_tests(module, min_confidence=0.0, verbose=True):
         agent.reset()
         response = agent.complete(case["query"])
         got = response.get("function_calls") or []
+        validation = response.get("validation") or {}
+        if got and (validation.get("ungrounded") or validation.get("negation")):
+            got = []
         if got and response.get("confidence", 0.0) < min_confidence:
             got = []
         want = case["calls"]

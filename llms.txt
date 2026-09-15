@@ -124,7 +124,7 @@ if r["type"] == "call":
 
 ## Confidence gating
 
-`confidence` is the min of a post-hoc calibration head and the decode probability of the call. Calibration holds for the base model only: an agent constructed with `weights=` reports `confidence` as None (fine-tuning does not update the head). Pick a threshold per product; act at/above it, escalate below it:
+`confidence` is the min of a post-hoc calibration head and the decode probability of the call. Calibration holds for the base model only: an agent constructed with `weights=` reports `confidence` as None (fine-tuning does not update the head). Pick a threshold per product; act at/above it, escalate below it (`escalate` in the response applies the engine default of 0.15):
 
 ```python
 r = agent.complete(user_text)
