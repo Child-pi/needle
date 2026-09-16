@@ -6,12 +6,12 @@ import threading
 
 HELP = """usage: needle <command> [options]
 
-  run            run a checkpoint on a query
-  finetune       train a LoRA adapter on JSONL data
+  run            run a checkpoint on a query (JAX, Needle 3)
+  finetune       train a LoRA adapter on JSONL data (--layers N for a rung)
   generate-data  synthesise training data via OpenRouter
-  build          export a checkpoint to a .cact archive
-  download       download weights or an engine build
-  fetch          fetch the engine for this platform
+  build          export a checkpoint (+ adapter) to a .cact archive
+  download       needle3 | needle3.safetensors | <platform> | <org>/<repo>[/<file>.cact]
+  fetch          fetch the engine library for this platform
   playground     serve the browser playground
 
 needle <command> --help for the options of one command.
@@ -23,6 +23,25 @@ def _weights_spec(spec):
     if len(parts) < 2:
         raise SystemExit("pass <org>/<repo>/<file>.cact or <org>/<repo>")
     return "/".join(parts[:2]), "/".join(parts[2:]) or None
+
+
+def _download_target(spec):
+    """Classify a `needle download` spec: engine build, base weights, checkpoint or hub archive."""
+    from .agent import fetch
+
+    if "/" in spec:
+        return "hub", spec
+    if spec in fetch.PLATFORMS:
+        return "platform", spec
+    name = spec[:-5] if spec.endswith(".cact") else spec
+    if name in ("needle2", "needle3"):
+        return "base", int(name[-1])
+    if spec.endswith((".safetensors", ".pkl")):
+        return "checkpoint", spec
+    raise SystemExit(
+        f"unknown download {spec!r}: pass needle3 (base weights), needle3.safetensors or "
+        f"needle3_enterprise.safetensors (a checkpoint to fine-tune), a platform ("
+        + ", ".join(fetch.PLATFORMS) + "), or <org>/<repo>[/<file>.cact]")
 
 
 _ABSL_LOG_START = re.compile(rb"^[EIWF]\d{4} \d\d:\d\d:\d\d")
@@ -170,8 +189,9 @@ def main():
     p.add_argument("--output", type=str, default=None)
 
     p = sub.add_parser("build")
-    p.add_argument("checkpoint", type=str,
-                   help="Base checkpoint (.safetensors or .pkl) to export")
+    p.add_argument("checkpoint", type=str, nargs="?", default=None,
+                   help="Base checkpoint (.safetensors or .pkl); defaults to the adapter's "
+                        "base, else the Needle 3 base (auto-downloads)")
     p.add_argument("--lora", type=str, default=None, help="LoRA adapter to merge before export")
     p.add_argument("--out", type=str, default=None, help="Output .cact path")
     p.add_argument("--upload", action="store_true", help="Push the .cact to $NEEDLE_HF_REPO")
@@ -182,7 +202,9 @@ def main():
 
     p = sub.add_parser("download")
     p.add_argument("spec", type=str,
-                   help="Platform folder (e.g. macos-arm64), or Hugging Face spec: "
+                   help="needle3 (base weights), needle3.safetensors or "
+                        "needle3_enterprise.safetensors (checkpoints to fine-tune), a platform "
+                        "folder (e.g. macos-arm64), or a Hugging Face spec: "
                         "<org>/<repo>/<file>.cact, or <org>/<repo> if it holds one archive")
     p.add_argument("--out", type=str, default=".", help="Directory to place the files")
     p.add_argument("--generation", type=int, choices=[2, 3], default=2,
@@ -228,11 +250,9 @@ def main():
         import shutil
         from huggingface_hub import hf_hub_download, list_repo_files
         from .agent import fetch
-        if "/" not in args.spec:
-            if args.spec not in fetch.PLATFORMS:
-                raise SystemExit("unknown platform, pick one of: "
-                                 + ", ".join(fetch.PLATFORMS))
-            paths = fetch.download_platform(args.spec, args.out,
+        kind, target = _download_target(args.spec)
+        if kind == "platform":
+            paths = fetch.download_platform(target, args.out,
                                             generation=args.generation)
             for path in paths:
                 print(f"  {'file':<9} {path}  {os.path.getsize(path) / 1e6:.2f} MB")
@@ -240,6 +260,17 @@ def main():
                            if os.path.basename(p) in ("needle", "needle.exe")), None)
             if runner:
                 print(f"  {'next':<9} {runner} --tools tools.json --serve")
+        elif kind == "base":
+            os.makedirs(args.out, exist_ok=True)
+            path = fetch.fetch_weights(target, args.out)
+            print(f"  {'weights':<9} {path}  {os.path.getsize(path) / 1e6:.2f} MB")
+            print(f"  {'next':<9} needle.Needle(weights={path!r}, tools=[...])")
+        elif kind == "checkpoint":
+            generation = 2 if target.startswith("needle2") else 3
+            path = fetch.fetch_checkpoint(target, os.path.join(args.out, fetch.CHECKPOINT_PREFIX),
+                                          generation=generation)
+            print(f"  {'file':<9} {path}  {os.path.getsize(path) / 1e6:.2f} MB")
+            print(f"  {'next':<9} needle finetune data.jsonl --checkpoint {path} [--layers N]")
         else:
             fetch._register_download(args.generation)
             repo, filename = _weights_spec(args.spec)

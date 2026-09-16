@@ -12,6 +12,12 @@ ENGINE_VERSIONS = {
     3: "3.0.0",
 }
 
+BASE_WEIGHTS = {
+    2: "needle2.cact",
+    3: "needle3.cact",
+}
+CHECKPOINT_PREFIX = "checkpoints"
+
 # Backwards-compatible aliases for callers that explicitly fetch Needle 2.
 HF_REPO = ENGINE_REPOS[2]
 ENGINE_VERSION = ENGINE_VERSIONS[2]
@@ -107,6 +113,59 @@ def download_platform(name, out_dir, generation=2):
             os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR
                      | stat.S_IXGRP | stat.S_IXOTH)
         out.append(target)
+    return out
+
+
+def base_weights(generation=2):
+    try:
+        return BASE_WEIGHTS[int(generation)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"unsupported Needle generation: {generation}") from exc
+
+
+def cache_dir(generation=2):
+    return os.path.join(os.path.expanduser("~"), ".cache", "cactus-needle",
+                        f"v{int(generation)}", engine_version(generation))
+
+
+def fetch_weights(generation=2, dest_dir=None):
+    """Download the base .cact archive of a generation (cached next to its engine)."""
+    import shutil
+    from huggingface_hub import hf_hub_download
+
+    name = base_weights(generation)
+    dest_dir = dest_dir or cache_dir(generation)
+    out = os.path.join(dest_dir, name)
+    if os.path.exists(out):
+        return out
+    _register_download(generation)
+    cached = hf_hub_download(repo_id=engine_repo(generation), filename=name, repo_type="model")
+    os.makedirs(dest_dir, exist_ok=True)
+    shutil.copyfile(cached, out)
+    return out
+
+
+def fetch_checkpoint(name, dest_dir, generation=3):
+    """Download a training checkpoint (needle3.safetensors, ...) for finetune/build."""
+    import shutil
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError
+
+    repo = engine_repo(generation)
+    _register_download(generation)
+    base = os.path.basename(name)
+    cached = None
+    for candidate in (f"{CHECKPOINT_PREFIX}/{base}", base):
+        try:
+            cached = hf_hub_download(repo_id=repo, filename=candidate, repo_type="model")
+            break
+        except EntryNotFoundError:
+            continue
+    if cached is None:
+        raise FileNotFoundError(f"{base} is not published in {repo}")
+    os.makedirs(dest_dir, exist_ok=True)
+    out = os.path.join(dest_dir, base)
+    shutil.copyfile(cached, out)
     return out
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import decimal
+import datetime
 import json
 import os
 import re
@@ -71,6 +72,15 @@ def _library_path(generation=2):
         return cached
     os.makedirs(cache, exist_ok=True)
     return fetch.fetch_library(version, cache, generation=generation)
+
+
+def _base_weights_path(generation):
+    from .agent import fetch
+
+    local = os.path.join(fetch.cache_dir(generation), fetch.base_weights(generation))
+    if os.path.exists(local):
+        return local
+    return fetch.fetch_weights(generation)
 
 
 _lib_handles = {}
@@ -147,25 +157,29 @@ def _lib(generation=2):
         lib.needle_reset.restype = None
         lib.needle_load.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
         lib.needle_load.restype = ctypes.c_int
-        if hasattr(lib, "needle_set_max_calls"):
-            lib.needle_set_max_calls.argtypes = [ctypes.c_int]
-            lib.needle_set_max_calls.restype = None
         _lib_handles[generation] = lib
     return _lib_handles[generation]
 
 
 class Needle:
-    def __init__(self, tools=None, system=None, weights=None, tool_index_path=None, buffer_size=65536):
+    def __init__(self, tools=None, system=None, weights=None, tool_index_path=None, buffer_size=65536,
+                 auto_date=True, generation=None):
         self._functions = {}
         self._weights = os.fspath(weights) if weights is not None else None
-        self._generation = _weight_generation(self._weights) if self._weights else 2
+        self._tuned = self._weights is not None
+        if self._tuned:
+            self._generation = _weight_generation(self._weights)
+        else:
+            self._generation = int(generation or 2)
+            if self._generation >= 3:
+                self._weights = _base_weights_path(self._generation)
         self._worker = None
         self._closed = False
-        if weights:
+        if self._tuned:
             warnings.warn("finetuning does not update the confidence head, so scores are "
                           "uncalibrated for tuned weights; this agent reports confidence as None",
                           stacklevel=2)
-        self._system_text = system or ""
+        self._system_text = _with_date_fact(system or "") if auto_date else (system or "")
         self._system = self._system_text.encode("utf-8")
         tools_json = tools if isinstance(tools, str) else json.dumps(self._resolve(tools))
         self._tools_json = tools_json.encode("utf-8")
@@ -219,24 +233,17 @@ class Needle:
         return schemas
 
     def _track_props(self):
-        return {"n_tools": self._n_tools, "tuned": bool(self._weights),
+        return {"n_tools": self._n_tools, "tuned": self._tuned,
                 "generation": self._generation}
 
-    def complete(self, text: str = "", max_new_tokens: int = 256,
+    def complete(self, text: str = "", max_new_tokens: int = 512,
                  audio=None, audio_format="wav", sample_rate=0,
                  channels=1) -> dict:
         _track("complete", self._track_props())
         payload = _prepare_audio(audio, audio_format, sample_rate, channels)
         return self._complete(text, max_new_tokens, payload)
 
-    def _set_max_calls(self, max_calls: int) -> None:
-        if self._worker is not None:
-            return
-        lib = _lib(self._generation)
-        if hasattr(lib, "needle_set_max_calls"):
-            lib.needle_set_max_calls(int(max_calls))
-
-    def _complete(self, text: str, max_new_tokens: int = 256,
+    def _complete(self, text: str, max_new_tokens: int = 512,
                   audio=None, ground: bool = True) -> dict:
         if audio is not None and self._generation < 3:
             raise ValueError("audio requires a Needle 3 model")
@@ -265,11 +272,11 @@ class Needle:
             raise RuntimeError(
                 f"engine returned an unparseable envelope ({err}); this is an "
                 f"engine bug - please report it with the prompt and schema") from err
-        if self._weights:
+        if self._tuned:
             response["confidence"] = None
         if ground:
             _annotate_ungrounded(response, self._tool_schemas, self._seen_years,
-                                 self._system_text)
+                                 self._system_text, text)
         return response
 
     def embed(self, text: str = "", audio=None, audio_format="wav",
@@ -292,7 +299,7 @@ class Needle:
         return list(output)
 
     def run(self, query: str = "", max_steps: int = 8,
-            max_new_tokens: int = 256, audio=None, audio_format="wav",
+            max_new_tokens: int = 512, audio=None, audio_format="wav",
             sample_rate=0, channels=1, strict: bool = True) -> dict:
         _track("run", self._track_props())
         payload = _prepare_audio(audio, audio_format, sample_rate, channels)
@@ -329,7 +336,7 @@ class Needle:
         response["results"] = executed
         return response
 
-    def extract(self, text: str, schema: type | dict, max_new_tokens: int = 256,
+    def extract(self, text: str, schema: type | dict, max_new_tokens: int = 512,
                 strict: bool = True) -> object:
         return extract(text, schema, max_new_tokens=max_new_tokens,
                        weights=self._weights, strict=strict)
@@ -407,9 +414,36 @@ def _source_years(text):
             for match in re.finditer(pattern, lowered)}
 
 
-def _licensed_years(seen_years, system=None):
+_ISO_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _with_date_fact(system: str) -> str:
+    """Prefix the local date fact unless the caller already supplied one."""
+    if "date:" in system or _ISO_STAMP.search(system):
+        return system
+    now = datetime.datetime.now()
+    fact = now.strftime("date: %Y-%m-%d %a %H:%M")
+    if not system.strip():
+        return fact
+    if system.lstrip().startswith("{"):
+        return system
+    return fact + "; " + system
+
+
+_RELATIVE_CUE = re.compile(
+    r"\b(today|tonight|tomorrow|yesterday|next|this|coming|now|in \d+ (?:days?|weeks?|months?|years?)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.IGNORECASE)
+
+
+def _relative_cue(text) -> bool:
+    return bool(text) and _RELATIVE_CUE.search(text) is not None
+
+
+def _licensed_years(seen_years, system=None, relative=True):
+    """Years a date argument may carry: the ones written in the input, plus the
+    system date's year when the input reasons relatively (tomorrow, next week)."""
     years = set(seen_years)
-    if years and system:
+    if years and system and relative:
         years |= _source_years(system)
     return years
 
@@ -446,7 +480,7 @@ def _walk_grounding(schema, arguments, years):
 
 
 def _temporal_grounding(text, schema, arguments, system=None):
-    years = _licensed_years(_source_years(text), system)
+    years = _licensed_years(_source_years(text), system, _relative_cue(text))
     return _walk_grounding(schema, arguments, years)
 
 
@@ -472,7 +506,15 @@ def _numeric_paths(arguments, path=""):
             yield from _numeric_paths(item, f"{path}[{index}]")
 
 
+_DATE_FACT = re.compile(r"date:\s*\d{4}-\d{2}-\d{2}(?:\s+[A-Za-z]{3})?(?:\s+\d{2}:\d{2})?|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?")
+
+
+def _without_date_facts(text):
+    return _DATE_FACT.sub(" ", text or "")
+
+
 def _source_numbers(*sources):
+    sources = tuple(_without_date_facts(source) for source in sources)
     """Numeric values written in the source texts, separators normalized."""
     text = "\n".join(source for source in sources if source)
     return {decimal.Decimal(match.group(0).replace(",", ""))
@@ -502,9 +544,9 @@ def _ungrounded_paths(response):
     return grouped
 
 
-def _annotate_ungrounded(response, tool_schemas, seen_years, system=None):
+def _annotate_ungrounded(response, tool_schemas, seen_years, system=None, text=None):
     calls = response.get("function_calls") or []
-    years = _licensed_years(seen_years, system)
+    years = _licensed_years(seen_years, system, _relative_cue(text) if text is not None else True)
     if not calls or not years:
         return
     schemas = {entry.get("name"): entry for entry in tool_schemas}
@@ -544,8 +586,8 @@ def _validate_extraction(text, schema, arguments, response, system=None):
 
 
 def extract(text: str, schema: type | dict, system: str | None = None,
-            max_new_tokens: int = 256, weights: str | None = None,
-            strict: bool = True) -> object:
+            max_new_tokens: int = 512, weights: str | None = None,
+            strict: bool = True, generation: int | None = None) -> object:
     """One-shot structured extraction using the matching native engine.
 
     With ``strict=True`` (the default), temporal values that contradict a literal
@@ -553,16 +595,12 @@ def extract(text: str, schema: type | dict, system: str | None = None,
     :class:`ExtractionValidationError` instead of being returned silently.
     """
     selected = weights
-    generation = _weight_generation(selected) if selected else 2
+    generation = _weight_generation(selected) if selected else int(generation or 2)
     _track("extract", {"n_tools": 1, "tuned": bool(selected),
                        "generation": generation})
-    agent = Needle(tools=[schema], system=system, weights=selected)
+    agent = Needle(tools=[schema], system=system, weights=selected, generation=generation)
     try:
-        agent._set_max_calls(1)
-        try:
-            response = agent._complete(text, max_new_tokens)
-        finally:
-            agent._set_max_calls(0)
+        response = agent._complete(text, max_new_tokens)
     finally:
         agent.close()
     calls = response.get("function_calls") or []

@@ -145,6 +145,21 @@ def test_finetune_on_a_rung_builds_that_depth(tiny_checkpoint, tmp_path):
                                          bits="4", layers=3))
 
 
+def test_build_without_a_checkpoint_uses_the_adapter_base(tiny_checkpoint, tmp_path):
+    from needle.model.finetune import finetune_local, build_main
+    from needle.model.export import read_export
+
+    data = tmp_path / "data.jsonl"
+    _write_data(data)
+    adapter = tmp_path / "adapter.safetensors"
+    finetune_local(_finetune_args(data, tiny_checkpoint, adapter, tmp_path / "ck"))
+    out = str(tmp_path / "from_adapter.cact")
+    build_main(types.SimpleNamespace(checkpoint=None, lora=str(adapter), out=out,
+                                     upload=False, bits="4"))
+    header, _ = read_export(out)
+    assert header["num_layers"] == 4
+
+
 def test_finetune_rng_is_controlled_by_seed():
     from needle.model.finetune import _training_rng
 

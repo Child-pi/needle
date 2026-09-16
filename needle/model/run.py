@@ -90,7 +90,12 @@ def load_checkpoint(path, return_run=False):
             f"(got format_version={version!r}). Old encoder-decoder/tool-calling "
             f"checkpoints are incompatible with this branch."
         )
-    config = TransformerConfig.from_saved(ckpt["config"])
+    saved = ckpt["config"] if isinstance(ckpt["config"], dict) else dict(vars(ckpt["config"]))
+    if "attn_dim" in saved and "qk_head_dim" not in saved:
+        raise ValueError(
+            f"{path} is a Needle 2 checkpoint; this package fine-tunes and builds Needle 3. "
+            "Use cactus-needle 2.x for it: pip install 'cactus-needle<3'")
+    config = TransformerConfig.from_saved(saved)
     params = {k: v for k, v in ckpt["params"].items() if not k.startswith("mtp_")}
     if return_run:
         return params, config, ckpt.get("run") or {}

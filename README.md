@@ -141,11 +141,15 @@ The base is Needle 3, a depth ladder: every rung from 2 layers up to the full st
 needle finetune data.jsonl --epochs 10 --layers 8
 ```
 
-**3. Build a tuned `.cact`.** Merge the adapter into the base and quantize. The base auto-downloads if absent.
+**3. Build a tuned `.cact`.** Merge the adapter into the base and quantize. The checkpoint is optional: `needle build` uses the base the adapter was trained on, and auto-downloads the Needle 3 base if absent.
 
 ```sh
-needle build checkpoints/needle3.safetensors --lora checkpoints/needle_lora.safetensors --out my_needle.cact
+needle build --lora checkpoints/needle_lora.safetensors --out my_needle.cact
+needle build checkpoints/needle3_enterprise.safetensors --lora adapter.safetensors --out my_needle.cact   # 20L base
+needle build --layers 4 --out needle3_4l.cact                                                            # untuned 4-layer rung
 ```
+
+The engine is weights-agnostic and never rebuilt: one engine library per platform (under 1MB) runs any archive, and the archive shrinks with the rung (about 9MB at 2 layers, 29MB at 16). `needle download needle3` fetches the base 16-layer archive by itself, `needle download needle3.safetensors` (or `needle3_enterprise.safetensors`) the checkpoint to fine-tune.
 
 Add `--bits 2` for a smaller model (by default the export follows the checkpoint's declared per-layer bit map, falling back to 4 when the checkpoint declares none), or set `NEEDLE_HF_REPO=<you>/<model>` and pass `--upload` to publish the `.cact`. The counterpart `needle download <you>/<model>/my_needle.cact` pulls a published archive on any machine, and `needle download <platform>` (e.g. `macos-arm64`) fetches that platform's engine runner.
 
@@ -154,6 +158,7 @@ Add `--bits 2` for a smaller model (by default the export follows the checkpoint
 ```python
 import needle
 agent = needle.Needle(weights="my_needle.cact", tools=[...])
+agent = needle.Needle(tools=[...], generation=3)   # the base Needle 3 archive, fetched once and cached
 agent.run("...")
 ```
 

@@ -466,13 +466,17 @@ def build_main(args):
     from .architecture import effective_kv_window
     from .export import vocab_rows_for, write_export
 
-    params, config, _ = load_checkpoint(args.checkpoint, return_run=True)
+    adapter = read_adapter(args.lora) if args.lora else None
+    checkpoint = args.checkpoint
+    if not checkpoint and adapter and adapter.get("base") and os.path.exists(adapter["base"]):
+        checkpoint = adapter["base"]
+    checkpoint = checkpoint or DEFAULT_BASE
+    params, config, _ = load_checkpoint(checkpoint, return_run=True)
     layers = getattr(args, "layers", None)
 
     adapter_qat_bits = None
     adapter_qat_bits_map = None
     if args.lora:
-        adapter = read_adapter(args.lora)
         adapter_layers = adapter.get("layers")
         if adapter_layers and layers and int(layers) != int(adapter_layers):
             raise ValueError(
@@ -509,7 +513,7 @@ def build_main(args):
         if not bits and not bits_map:
             bits = "4"
 
-    out = args.out or (os.path.splitext(os.path.basename(args.checkpoint))[0] + ".cact")
+    out = args.out or (os.path.splitext(os.path.basename(checkpoint))[0] + ".cact")
     info = write_export(params, config, out,
                         bits=int(bits) if bits else 4,
                         bits_map=bits_map,

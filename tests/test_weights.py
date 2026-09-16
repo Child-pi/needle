@@ -101,6 +101,30 @@ def _tuned_agent(path):
         return needle.Needle(tools="[]", weights=path)
 
 
+def test_generation_3_without_weights_runs_the_base_archive(engine, tuned_v3, monkeypatch):
+    import needle
+
+    monkeypatch.setattr(needle, "_base_weights_path", lambda generation: tuned_v3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        agent = needle.Needle(tools="[]", generation=3)
+    assert agent._generation == 3 and agent._tuned is False
+    response = agent.complete("hello")
+    assert response.get("confidence", "kept") is not None
+    assert any(call[0] == "worker_start" and call[3] == tuned_v3
+               for call in engine if isinstance(call, tuple))
+    assert agent._track_props()["tuned"] is False
+
+
+def test_default_agent_is_still_the_embedded_needle_2(engine):
+    import needle
+
+    agent = needle.Needle(tools="[]")
+    assert agent._generation == 2 and agent._weights is None
+    agent.complete("hello")
+    assert "complete" in engine
+
+
 def test_base_agent_and_tuned_worker_coexist(engine, tuned):
     import needle
 

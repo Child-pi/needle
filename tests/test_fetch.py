@@ -25,6 +25,58 @@ def test_legacy_lib_override_cannot_capture_v3(tmp_path, monkeypatch):
     assert needle._library_path(3) == str(v3)
 
 
+def test_download_target_kinds():
+    import pytest
+    from needle.cli import _download_target
+
+    assert _download_target("macos-arm64") == ("platform", "macos-arm64")
+    assert _download_target("needle3") == ("base", 3)
+    assert _download_target("needle2.cact") == ("base", 2)
+    assert _download_target("needle3.safetensors") == ("checkpoint", "needle3.safetensors")
+    assert _download_target("needle3_enterprise.safetensors") == ("checkpoint", "needle3_enterprise.safetensors")
+    assert _download_target("acme/tuned/model.cact") == ("hub", "acme/tuned/model.cact")
+    with pytest.raises(SystemExit, match="unknown download"):
+        _download_target("needle4")
+
+
+def test_fetch_weights_copies_the_base_archive_and_reuses_it(tmp_path, monkeypatch):
+    from needle.agent import fetch
+
+    archive = tmp_path / "needle3.cact"
+    archive.write_bytes(b"weights")
+    calls = []
+
+    def fake_download(**kwargs):
+        calls.append(kwargs["filename"])
+        return str(archive)
+
+    monkeypatch.setattr(fetch, "_register_download", lambda generation: None)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    dest = tmp_path / "cache"
+    out = fetch.fetch_weights(3, str(dest))
+    assert out == str(dest / "needle3.cact") and open(out, "rb").read() == b"weights"
+    assert calls == ["needle3.cact"]
+    assert fetch.fetch_weights(3, str(dest)) == out and calls == ["needle3.cact"]
+
+
+def test_fetch_checkpoint_prefers_the_checkpoints_folder(tmp_path, monkeypatch):
+    from huggingface_hub.errors import EntryNotFoundError
+    from needle.agent import fetch
+
+    source = tmp_path / "needle3.safetensors"
+    source.write_bytes(b"ckpt")
+
+    def fake_download(**kwargs):
+        if kwargs["filename"] != "checkpoints/needle3.safetensors":
+            raise EntryNotFoundError("missing")
+        return str(source)
+
+    monkeypatch.setattr(fetch, "_register_download", lambda generation: None)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    out = fetch.fetch_checkpoint("needle3.safetensors", str(tmp_path / "dl" / "checkpoints"))
+    assert out.endswith("checkpoints/needle3.safetensors") and open(out, "rb").read() == b"ckpt"
+
+
 def test_weights_spec_parsing():
     from needle.cli import _weights_spec
 
