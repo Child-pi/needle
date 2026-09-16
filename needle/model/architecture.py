@@ -68,6 +68,7 @@ class TransformerConfig:
     ladder_depths: tuple = ()
     ladder_sample: bool = False
     ladder_widths: tuple = ()
+    ladder_order: tuple = ()
     mhc_lanes: int = 4
     qkv_conv_taps: int = 3
     out_vocab: int = 0
@@ -105,6 +106,7 @@ class TransformerConfig:
         self.global_layers = tuple(self.global_layers)
         self.ladder_depths = tuple(self.ladder_depths)
         self.ladder_widths = tuple(self.ladder_widths)
+        self.ladder_order = tuple(self.ladder_order)
 
     @classmethod
     def from_saved(cls, saved):
@@ -115,7 +117,8 @@ class TransformerConfig:
         for key, off in (("qk_head_dim", 0), ("v_head_dim", 0),
                          ("sliding_window", 0), ("global_layers", ()),
                          ("ladder_depths", ()), ("ladder_sample", False),
-                         ("ladder_widths", ()), ("engram_seed_heads", 0),
+                         ("ladder_widths", ()), ("ladder_order", ()),
+                         ("engram_seed_heads", 0),
                          ("qkv_conv_taps", 0), ("out_vocab", 0),
                          ("image_code_offset", 0), ("image_sem_codes", 0),
                          ("image_sem_dim", 0), ("image_tex_books", 0),
@@ -157,23 +160,39 @@ def _ladder_layer_order(num_layers):
     return tuple(order)
 
 
-def ladder_layer_indices(num_layers, depth):
+def ladder_order(spec):
+    """Block selection order for a model: the bisection order of its depth, or
+    the parent's order carried by a sliced rung so nested slices stay trained."""
+    if isinstance(spec, int):
+        return _ladder_layer_order(spec)
+    saved = tuple(getattr(spec, "ladder_order", ()) or ())
+    if saved:
+        if sorted(saved) != list(range(spec.num_layers)):
+            raise ValueError(f"ladder_order {saved} is not a permutation of "
+                             f"{spec.num_layers} blocks")
+        return saved
+    return _ladder_layer_order(spec.num_layers)
+
+
+def ladder_layer_indices(spec, depth):
     """Return the stable, nested original-layer indices for a depth rung.
 
     Every deployable rung keeps both endpoint blocks. Interior blocks are
     added one at a time by bisecting the largest remaining gap, producing
     deterministic nested subnetworks with spatially balanced coverage.
+    `spec` is a layer count or a config (whose ladder_order wins).
     """
+    num_layers = spec if isinstance(spec, int) else spec.num_layers
     if not 2 <= depth <= num_layers:
         raise ValueError(
             f"ladder depth must be in [2, {num_layers}], got {depth}")
-    return tuple(sorted(_ladder_layer_order(num_layers)[:depth]))
+    return tuple(sorted(ladder_order(spec)[:depth]))
 
 
-def ladder_layer_ranks(num_layers):
+def ladder_layer_ranks(spec):
     """Map each original block to its selection rank in the nested ladder."""
-    order = _ladder_layer_order(num_layers)
-    ranks = [0] * num_layers
+    order = ladder_order(spec)
+    ranks = [0] * len(order)
     for rank, layer in enumerate(order):
         ranks[layer] = rank
     return tuple(ranks)
@@ -182,10 +201,11 @@ def ladder_layer_ranks(num_layers):
 def ladder_config(config, depth):
     assert depth < config.num_layers
     assert tuple(config.engram_layers) == tuple(sorted(config.engram_layers))
-    selected = ladder_layer_indices(config.num_layers, depth)
+    selected = ladder_layer_indices(config, depth)
     remap = {layer: i for i, layer in enumerate(selected)}
     fields = dict(config.__dict__)
     fields["num_layers"] = depth
+    fields["ladder_order"] = tuple(remap[l] for l in ladder_order(config) if l in remap)
     fields["global_layers"] = tuple(
         remap[l] for l in config.global_layers if l in remap)
     fields["engram_layers"] = tuple(
@@ -198,13 +218,13 @@ def ladder_config(config, depth):
 def ladder_row_keep(config, exit_depth=None):
     if exit_depth is None:
         return None
-    ranks = jnp.asarray(ladder_layer_ranks(config.num_layers), jnp.int32)
+    ranks = jnp.asarray(ladder_layer_ranks(config), jnp.int32)
     return jnp.concatenate([jnp.ones((1,), jnp.float32),
                             (ranks < exit_depth).astype(jnp.float32)])
 
 
 def ladder_slice(params, config, depth):
-    selected = ladder_layer_indices(config.num_layers, depth)
+    selected = ladder_layer_indices(config, depth)
     selected_set = set(selected)
     selected_array = jnp.asarray(selected, dtype=jnp.int32)
     rows = jnp.asarray((0, *(layer + 1 for layer in selected)), jnp.int32)
@@ -828,7 +848,7 @@ class Stack(nn.Module):
         else:
             carry = x
 
-        layer_ranks = jnp.asarray(ladder_layer_ranks(L), dtype=jnp.int32)
+        layer_ranks = jnp.asarray(ladder_layer_ranks(cfg), dtype=jnp.int32)
         if exit_depth is not None:
             active = layer_ranks < exit_depth
             sub_positions = jnp.cumsum(active.astype(jnp.int32)) - 1

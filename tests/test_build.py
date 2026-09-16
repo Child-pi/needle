@@ -38,6 +38,21 @@ def test_build_layers_exports_the_rung(tiny_checkpoint, tmp_path):
     assert header["num_layers"] == 3
 
 
+def test_rung_of_a_rung_is_the_trained_rung(tiny_checkpoint):
+    import jax
+    import numpy as np
+    from needle.model.finetune import rung
+    from needle.model.run import load_checkpoint
+
+    params, config = load_checkpoint(tiny_checkpoint)
+    p3, c3 = rung(params, config, 3)
+    via_3, c_via = rung(p3, c3, 2)
+    direct, c_direct = rung(params, config, 2)
+    assert c3.ladder_order and vars(c_via) == vars(c_direct)
+    for a, b in zip(jax.tree_util.tree_leaves(via_3), jax.tree_util.tree_leaves(direct)):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
 def test_load_checkpoint_drops_the_mtp_block(tiny_checkpoint, tmp_path):
     import pickle
     import numpy as np

@@ -104,6 +104,7 @@ Every turn returns one dict:
 - `reasoning` is a short unconstrained derivation of each argument from its source span.
 - `confidence` is a calibrated score in [0,1] (see Confidence gating).
 - `validation.ungrounded`, when present, lists `tool.field` names whose value is not grounded in the input, including date arguments whose year matches nothing in the conversation or the `system` facts. `run()` refuses those calls with `{"error": "ungrounded field"}` unless `strict=False`.
+- `extract()` caps the engine at one call per turn (`needle_set_max_calls`), so a record schema never yields a second record.
 - Arguments arrive after the engine's deterministic repair step, which grounds them in the request text: a full name in one of a first/last pair is split, a truncated phone number is completed, quoted titles are restored verbatim, place queries recover dropped words and a following street address, weekday and `March 4th` style dates resolve against the `date:` fact, empty optional strings and duplicate calls are dropped. Enumerated parameters are never altered.
 
 ## Behaviour contract (important for correct code)
