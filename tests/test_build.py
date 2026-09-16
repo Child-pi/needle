@@ -6,17 +6,16 @@ import pytest
 pytestmark = pytest.mark.slow
 
 
-def _build_args(checkpoint, out, bits="4", lora=None):
-    return types.SimpleNamespace(checkpoint=checkpoint, lora=lora, out=out,
-                                 upload=False, bits=bits)
+def _build_args(checkpoint, out, lora=None):
+    return types.SimpleNamespace(checkpoint=checkpoint, lora=lora, out=out, upload=False)
 
 
-def test_build_exports_loadable_cact(tiny_checkpoint, tmp_path):
+def test_build_exports_loadable_cact(tiny_checkpoint, tmp_path, published_base):
     from needle.model.finetune import build_main
     from needle.model.export import read_export
 
     out = str(tmp_path / "tiny.cact")
-    build_main(_build_args(tiny_checkpoint, out, bits="4"))
+    build_main(_build_args(tiny_checkpoint, out))
 
     assert os.path.exists(out)
     assert os.path.getsize(out) > 0
@@ -24,33 +23,7 @@ def test_build_exports_loadable_cact(tiny_checkpoint, tmp_path):
     assert header["num_tensors"] > 0
     assert len(tensors) == header["num_tensors"]
     assert any(isinstance(t, (bytes, bytearray)) for t in tensors)
-
-
-def test_build_layers_exports_the_rung(tiny_checkpoint, tmp_path):
-    from needle.model.finetune import build_main
-    from needle.model.export import read_export
-
-    out = str(tmp_path / "tiny_3l.cact")
-    args = _build_args(tiny_checkpoint, out, bits="4")
-    args.layers = 3
-    build_main(args)
-    header, _ = read_export(out)
-    assert header["num_layers"] == 3
-
-
-def test_rung_of_a_rung_is_the_trained_rung(tiny_checkpoint):
-    import jax
-    import numpy as np
-    from needle.model.finetune import rung
-    from needle.model.run import load_checkpoint
-
-    params, config = load_checkpoint(tiny_checkpoint)
-    p3, c3 = rung(params, config, 3)
-    via_3, c_via = rung(p3, c3, 2)
-    direct, c_direct = rung(params, config, 2)
-    assert c3.ladder_order and vars(c_via) == vars(c_direct)
-    for a, b in zip(jax.tree_util.tree_leaves(via_3), jax.tree_util.tree_leaves(direct)):
-        assert np.array_equal(np.asarray(a), np.asarray(b))
+    assert published_base == [(3, True)]
 
 
 def test_load_checkpoint_drops_the_mtp_block(tiny_checkpoint, tmp_path):
@@ -66,16 +39,6 @@ def test_load_checkpoint_drops_the_mtp_block(tiny_checkpoint, tmp_path):
         pickle.dump(checkpoint, handle)
     params, _ = load_checkpoint(str(path))
     assert "mtp_combine" not in params
-
-
-def test_build_at_two_bits(tiny_checkpoint, tmp_path):
-    from needle.model.finetune import build_main
-    from needle.model.export import read_export
-
-    out = str(tmp_path / "tiny_w2.cact")
-    build_main(_build_args(tiny_checkpoint, out, bits="2"))
-    header, _ = read_export(out)
-    assert header["num_tensors"] > 0
 
 
 def test_export_round_trips_a_projection(tiny_checkpoint, tmp_path):
@@ -101,7 +64,7 @@ def test_export_round_trips_a_projection(tiny_checkpoint, tmp_path):
     assert np.corrcoef(dequant.ravel(), original.ravel())[0, 1] > 0.9
 
 
-def test_build_from_safetensors_checkpoint(tiny_checkpoint, tiny_checkpoint_safetensors, tmp_path):
+def test_build_from_safetensors_checkpoint(tiny_checkpoint, tiny_checkpoint_safetensors, tmp_path, published_base):
     from needle.model.finetune import build_main
     from needle.model.export import read_export
     from needle.model.run import load_checkpoint
@@ -114,6 +77,18 @@ def test_build_from_safetensors_checkpoint(tiny_checkpoint, tiny_checkpoint_safe
     assert all(np.array_equal(np.asarray(x), np.asarray(y))
                for x, y in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)))
     out = str(tmp_path / "from_safetensors.cact")
-    build_main(_build_args(tiny_checkpoint_safetensors, out, bits="4"))
+    build_main(_build_args(tiny_checkpoint_safetensors, out))
     header, _ = read_export(out)
     assert header["num_tensors"] > 0
+
+
+def test_build_layers_exports_the_rung(tiny_checkpoint, tmp_path, published_base):
+    from needle.model.finetune import build_main
+    from needle.model.export import read_export
+
+    out = str(tmp_path / "rung.cact")
+    args = _build_args(tiny_checkpoint, out)
+    args.layers = 3
+    build_main(args)
+    header, _ = read_export(out)
+    assert header["num_layers"] == 3

@@ -1,24 +1,23 @@
 ![Needle](assets/banner.png)
 
-# Needle 2
+# Needle 3
 
-Needle 2 is an open 45M-parameter model for tool calling, device use and structured extraction. The whole model is a single 14MB binary that runs a full session in about 28MB of RAM. It is built on our Simple Attention Network findings, compressed to CQ2-bit with Cactus Quants, and baked into its own engine. On the benchmarks below, Needle 2 trades wins with other small models like FunctionGemma 270M, LFM2.5 230M and Apple FM, at 5x to 70x smaller, and 2 bits against their f16.
+Needle 3 is a 25-121M parameter foundation model for tool calling and structured extraction on tiny devices. It is a Laddered Simple Attention Network: any depth from 2 to 20 layers is a complete model, compressed to CQ2-bit with Cactus Quants into one 9-35 MB weights file that a sub-1 MB engine loads at start.
 
-This repository is the Python package: inference, LoRA fine-tuning, and export. `pip install cactus-needle`, describe your tools, and call them from Python. The inference engine is fetched once from Hugging Face and cached; there is nothing else to build, and offline setup for air gapped devices is covered in [doc/apis.md](doc/apis.md).
+This repository is the Python package: inference, LoRA fine-tuning, and export. `pip install cactus-needle`, describe your tools, and call them from Python. The engine and the weights are fetched once from Hugging Face and cached; there is nothing else to build.
 
-- **Self-contained**: weights baked into a single 14MB engine; no separate model files to manage, and inference does no network.
+- **Self-contained**: a sub-1 MB engine per platform plus one `needle3.cact` weights file; inference does no network.
 - **Simple contract**: tool calls come back as structured data, text in, JSON out; a byte-level grammar compiled from your schemas constrains every token.
 - **Confidence-gated**: every response carries a calibrated confidence score from a learned head; set a threshold, act above it, escalate below it.
-- **Tool retrieval**: declare a large catalogue and a built-in retrieval head renders only the top five tools per turn, with the grammar constrained to that subset.
-- **Bounded memory**: a 256-token sliding window with the tools pinned as KV sinks, so total memory stays near 28MB no matter how long the conversation runs.
+- **Bounded memory**: a 256-token sliding window with the tools pinned as KV sinks, so memory stays flat no matter how long the conversation runs.
 
-Weights: [huggingface.co/Cactus-Compute/needle2](https://huggingface.co/Cactus-Compute/needle2) &middot; source: [github.com/cactus-compute/needle](https://github.com/cactus-compute/needle).
+Weights: [huggingface.co/Cactus-Compute/needle3](https://huggingface.co/Cactus-Compute/needle3) &middot; source: [github.com/cactus-compute/needle](https://github.com/cactus-compute/needle).
 
 ![Size-quality frontier: mobile-class and below](assets/frontier.png)
 
-## Simple Attention Network
+## Laddered Simple Attention Network
 
-Needle 2 is a Simple Attention Network, our dense small-model recipe: a Hadamard MLP in place of the FFN, GQA attention, engram key-value memory, and multi-lane hyper-connections. See the paper for the design and ablations: [arXiv:2607.18363](https://arxiv.org/abs/2607.18363).
+Needle 3 is a Laddered Simple Attention Network, our small-model recipe: a Monarch Hadamard MLP in place of the FFN, GQA attention with causal conv taps, engram n-gram memory read by gather, and multi-lane hyper-connections, trained so that every depth from 2 to 20 layers is a deployable model. See the paper for the design and ablations: [arXiv:2607.18363](https://arxiv.org/abs/2607.18363).
 
 ![Simple Attention Network architecture](assets/architecture.png)
 
@@ -121,7 +120,7 @@ needle finetune data.jsonl --epochs 10
 needle finetune data.jsonl --epochs 10 --generate 300 --lora-rank 16 --lora-alpha 32
 ```
 
-Key options: `--epochs` (default 3), `--layers <n>` (fine-tune the n-layer rung of the base, see below), `--lora-rank` (16), `--lora-alpha` (32), `--lr` (1e-4), `--batch-size` (16), `--max-len` (1024), `--val-split` (0.1), `--checkpoint <base.safetensors or .pkl>`, `--checkpoint-dir <dir>` (default `checkpoints`), `--out <adapter.safetensors or .pkl>`, `--generate <n>`, `--model <id>` (default `deepseek/deepseek-v4-flash`), and `--workers <n>` (default 8). `--generate` uses the configured OpenRouter endpoint to synthesize extra examples before training. The adapter is written to `checkpoints/needle_lora.pkl` by default. A validation loss prints each epoch from the held out split.
+Key options: `--epochs` (default 3), `--lora-rank` (16), `--lora-alpha` (32), `--lr` (1e-4), `--batch-size` (16), `--max-len` (1024), `--val-split` (0.1), `--checkpoint <base.safetensors or .pkl>`, `--checkpoint-dir <dir>` (default `checkpoints`), `--out <adapter.safetensors or .pkl>`, `--generate <n>`, `--model <id>` (default `deepseek/deepseek-v4-flash`), and `--workers <n>` (default 8). `--generate` uses the configured OpenRouter endpoint to synthesize extra examples before training. The adapter is written to `checkpoints/needle_lora.pkl` by default. A validation loss prints each epoch from the held out split.
 
 Training is plain JAX and runs on any accelerator jax supports. On an NVIDIA machine install the CUDA build and the same command trains on the GPU:
 
@@ -135,30 +134,26 @@ On Apple Silicon the `metal` extra trains on the GPU:
 pip install "cactus-needle[train,metal]"
 ```
 
-The base is Needle 3, a depth ladder: every rung from 2 layers up to the full stack is a trained model whose blocks are a nested subset of the full one. `--layers n` slices the base to its n-layer rung before training, trains that rung at full depth, and records the depth in the adapter, so `needle build` exports the same rung. A smaller rung trains and runs faster and fits a smaller device at some accuracy cost; without `--layers` the full base is fine-tuned.
+Fine-tuning trains LoRA through 4-bit quantisation-aware numerics at the full 20 layers, so the adapter matches the archive `needle build` writes.
 
-```sh
-needle finetune data.jsonl --epochs 10 --layers 8
-```
-
-**3. Build a tuned `.cact`.** Merge the adapter into the base and quantize. The checkpoint is optional: `needle build` uses the base the adapter was trained on, and auto-downloads the Needle 3 base if absent.
+**3. Build a tuned `.cact`.** Merge the adapter into the base and quantise to 4 bits. The checkpoint is optional: `needle build` uses the base the adapter was trained on, and auto-downloads the Needle 3 base if absent. Every build fetches the published `needle3.cact` and takes its tokenizer from it.
 
 ```sh
 needle build --lora checkpoints/needle_lora.safetensors --out my_needle.cact
-needle build checkpoints/needle3_enterprise.safetensors --lora adapter.safetensors --out my_needle.cact   # 20L base
-needle build --layers 4 --out needle3_4l.cact                                                            # untuned 4-layer rung
+needle build --lora checkpoints/needle_lora.safetensors --layers 8 --out my_needle_8l.cact   # 8-layer rung of the tuned base
 ```
 
-The engine is weights-agnostic and never rebuilt: one engine library per platform (under 1MB) runs any archive, and the archive shrinks with the rung (about 9MB at 2 layers, 29MB at 16). `needle download needle3` fetches the base 16-layer archive by itself, `needle download needle3.safetensors` (or `needle3_enterprise.safetensors`) the checkpoint to fine-tune.
+The engine is weights-agnostic and never rebuilt: one engine library per platform (under 1MB) runs any archive. `needle download needle3` fetches the base 20-layer archive by itself, `needle download needle3.safetensors` the checkpoint to fine-tune. `needle build --layers n` exports any rung from 2 to 20 layers of the tuned base.
 
-Add `--bits 2` for a smaller model (by default the export follows the checkpoint's declared per-layer bit map, falling back to 4 when the checkpoint declares none), or set `NEEDLE_HF_REPO=<you>/<model>` and pass `--upload` to publish the `.cact`. The counterpart `needle download <you>/<model>/my_needle.cact` pulls a published archive on any machine, and `needle download <platform>` (e.g. `macos-arm64`) fetches that platform's engine runner.
+Set `NEEDLE_HF_REPO=<you>/<model>` and pass `--upload` to publish the `.cact`. The counterpart `needle download <you>/<model>/my_needle.cact` pulls a published archive on any machine, and `needle download <platform>` (e.g. `macos-arm64`) fetches that platform's engine runner.
 
 **4. Run it.** The engine is weights-agnostic, so a tuned `.cact` runs on it directly - no recompilation:
 
 ```python
 import needle
 agent = needle.Needle(weights="my_needle.cact", tools=[...])
-agent = needle.Needle(tools=[...], generation=3)   # the base Needle 3 archive, fetched once and cached
+agent = needle.Needle(tools=[...])                 # the base Needle 3 archive, fetched once and cached
+agent = needle.Needle(tools=[...], generation=2)   # Needle 2, for existing deployments
 agent.run("...")
 ```
 
@@ -168,11 +163,11 @@ Cactus Compute collects strictly anonymous usage telemetry (function name, packa
 
 ## Citation
 
-Needle 2 is built by the Cactus Compute team. If you use it in your work, please cite:
+Needle 3 is built by the Cactus Compute team. If you use it in your work, please cite:
 
 ```bibtex
-@misc{needle2_2026,
-  title        = {Needle 2: A 45M-Parameter Foundation Tool-Calling Model for Tiny Devices},
+@misc{needle3_2026,
+  title        = {Needle 3: A Foundation Tool-Calling Model for Tiny Devices},
   author       = {Ndubuaku, Henry and Mosoyan, Karen and Mroz, Jakub and Cylich, Noah and
                   Kumar, Satyajit and Sandhu, Parkirat and Shemet, Roman and Lee, Justin H.},
   year         = {2026},

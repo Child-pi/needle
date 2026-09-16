@@ -258,6 +258,7 @@ def load_jsonl(path, tokenizer, max_len):
     return np.array(seqs, np.int32), np.array(masks, np.float32)
 
 
+
 def rung(params, config, layers):
     from .architecture import ladder_config, ladder_slice
 
@@ -317,8 +318,7 @@ def finetune_local(args, progress=None):
     import optax
     from .run import load_checkpoint
     from .architecture import SimpleAttentionNetwork
-    from .quantize import (configure_deploy, cq_ste_params,
-                           cq_ste_mixed_params, parse_bits_map)
+    from .quantize import configure_deploy, cq_ste_params, WEIGHT_BITS
 
     def emit(msg):
         print(msg, flush=True)
@@ -332,8 +332,6 @@ def finetune_local(args, progress=None):
                                   workers=getattr(args, "workers", 8))
 
     params, config = load_checkpoint(base_path)
-    layers = getattr(args, "layers", None)
-    params, config = rung(params, config, layers)
     config.dtype = "float32"
     params = jax.tree.map(lambda a: np.asarray(a).astype(np.float32), params)
     backend = jax.default_backend().lower()
@@ -352,29 +350,9 @@ def finetune_local(args, progress=None):
     emit(f"  {'data':<9} {len(seqs)} examples  seq_len {max_len}  cap {args.max_len}")
 
     model = SimpleAttentionNetwork(config)
-    qat_mode = getattr(args, "qat_bits", "auto")
-    qat_mode = "none" if qat_mode is None else str(qat_mode).lower()
-    qat_bits = None
-    qat_bits_map = None
-    parsed_bits_map = None
-    if qat_mode == "auto":
-        qat_bits_map = getattr(config, "weight_bits", "") or None
-        if qat_bits_map:
-            parsed_bits_map = parse_bits_map(qat_bits_map)
-        else:
-            qat_bits = 4
-    elif qat_mode in ("2", "4"):
-        qat_bits = int(qat_mode)
-    elif qat_mode != "none":
-        raise ValueError("--qat-bits must be auto, none, 2, or 4")
-    qat_enabled = qat_bits is not None or qat_bits_map is not None
-    if qat_enabled:
-        configure_deploy(act_bits=getattr(config, "act_bits", 8),
-                         kv_bits=getattr(config, "kv_bits", 8))
-        scheme = f"mixed[{qat_bits_map}]" if qat_bits_map else f"W{qat_bits}"
-        emit(f"  {'numerics':<9} CQ {scheme} STE + A8 (matches export)")
-    else:
-        emit(f"  {'numerics':<9} full precision")
+    configure_deploy(act_bits=getattr(config, "act_bits", 8),
+                     kv_bits=getattr(config, "kv_bits", 8))
+    emit(f"  {'numerics':<9} CQ W{WEIGHT_BITS} STE + A8 (matches export)")
     paths = lora_target_paths(params)
     scale = args.lora_alpha / args.lora_rank
     seed = int(getattr(args, "seed", 0))
@@ -402,13 +380,8 @@ def finetune_local(args, progress=None):
     emit(f"  {'schedule':<9} {total_steps} steps  warmup {warmup}  cosine decay  clip 1.0  (compiling...)")
 
     def loss_fn(lora, ids, mask):
-        merged = merge_lora(params, lora, scale)
-        if qat_bits_map is not None:
-            bits_map, default_bits = parsed_bits_map
-            merged = cq_ste_mixed_params(merged, bits_map, default_bits)
-        elif qat_bits is not None:
-            merged = cq_ste_params(merged, qat_bits)
-        logits = model.apply({"params": merged}, ids, quant=qat_enabled)
+        merged = cq_ste_params(merge_lora(params, lora, scale), WEIGHT_BITS)
+        logits = model.apply({"params": merged}, ids, quant=True)
         logits, targets, mask = logits[:, :-1], ids[:, 1:], mask[:, 1:]
         ce = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
         return (ce * mask).sum() / jnp.maximum(mask.sum(), 1.0)
@@ -450,10 +423,7 @@ def finetune_local(args, progress=None):
         "scale": float(scale),
         "base": base_path,
         "rank": args.lora_rank,
-        "qat_bits": qat_bits,
-        "qat_bits_map": qat_bits_map,
         "seed": seed,
-        "layers": int(config.num_layers),
     })
     print(f"  {'adapter':<9} {out}")
     print(f"  {'next':<9} needle build {base_path} --lora {out}")
@@ -462,66 +432,33 @@ def finetune_local(args, progress=None):
 
 def build_main(args):
     import jax.numpy as jnp
+    from ..agent import fetch
     from .run import load_checkpoint
     from .architecture import effective_kv_window
-    from .export import vocab_rows_for, write_export
+    from .export import read_tokenizer_blob, write_export
+    from .quantize import WEIGHT_BITS
 
+    base_archive = fetch.fetch_weights(3, force=True)
+    print(f"  {'base':<9} {base_archive}  {os.path.getsize(base_archive) / 1e6:.2f} MB")
     adapter = read_adapter(args.lora) if args.lora else None
     checkpoint = args.checkpoint
     if not checkpoint and adapter and adapter.get("base") and os.path.exists(adapter["base"]):
         checkpoint = adapter["base"]
     checkpoint = checkpoint or DEFAULT_BASE
     params, config, _ = load_checkpoint(checkpoint, return_run=True)
-    layers = getattr(args, "layers", None)
-
-    adapter_qat_bits = None
-    adapter_qat_bits_map = None
-    if args.lora:
-        adapter_layers = adapter.get("layers")
-        if adapter_layers and layers and int(layers) != int(adapter_layers):
-            raise ValueError(
-                f"adapter was trained on the {adapter_layers}-layer rung, but --layers "
-                f"{layers} would export a different depth")
-        layers = adapter_layers or layers
-    params, config = rung(params, config, layers)
     if args.lora:
         lora = {tuple(key.split("/")): {"A": jnp.asarray(v["A"]), "B": jnp.asarray(v["B"])}
                 for key, v in adapter["lora"].items()}
         params = merge_lora(params, lora, adapter["scale"])
         print(f"  {'merged':<9} {len(lora)} weight groups  {args.lora}")
-        adapter_qat_bits = adapter.get("qat_bits")
-        adapter_qat_bits_map = adapter.get("qat_bits_map")
-
-    bits = args.bits
-    if adapter_qat_bits_map is not None:
-        if bits is not None:
-            raise ValueError(
-                "adapter was trained for the checkpoint's mixed CQ bit map, but "
-                f"--bits {bits} would deploy different numerics")
-        bits_map = adapter_qat_bits_map
-        print(f"  {'scheme':<9} CQ mixed[{bits_map}] from QAT adapter metadata")
-    elif adapter_qat_bits is not None:
-        if bits is not None and int(bits) != int(adapter_qat_bits):
-            raise ValueError(
-                f"adapter was trained for CQ W{adapter_qat_bits}, but --bits {bits} "
-                "would deploy different numerics; rebuild at the adapter bit width")
-        bits = str(adapter_qat_bits)
-        bits_map = None
-        print(f"  {'scheme':<9} CQ W{bits} from QAT adapter metadata")
-    else:
-        bits_map = None if bits else (getattr(config, "weight_bits", "") or None)
-        if not bits and not bits_map:
-            bits = "4"
+    params, config = rung(params, config, getattr(args, "layers", None))
+    print(f"  {'depth':<9} {config.num_layers} layers")
 
     out = args.out or (os.path.splitext(os.path.basename(checkpoint))[0] + ".cact")
-    info = write_export(params, config, out,
-                        bits=int(bits) if bits else 4,
-                        bits_map=bits_map,
-                        tokenizer=get_tokenizer(config.vocab_size),
-                        kv_window=effective_kv_window(config),
-                        vocab_rows=vocab_rows_for(config))
-    scheme = f"mixed[{bits_map}]" if bits_map else f"W{bits}"
-    print(f"  {'wrote':<9} {info['path']}  {info['bytes'] / 1e6:.2f} MB  {info['tensors']} tensors  {scheme}A8")
+    info = write_export(params, config, out, bits=WEIGHT_BITS,
+                        tokenizer=read_tokenizer_blob(base_archive),
+                        kv_window=effective_kv_window(config))
+    print(f"  {'wrote':<9} {info['path']}  {info['bytes'] / 1e6:.2f} MB  {info['tensors']} tensors  W{WEIGHT_BITS}A8")
     print(f"  {'next':<9} needle.Needle(weights={out!r}, tools=[...])")
 
     if args.upload:

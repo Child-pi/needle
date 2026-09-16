@@ -20,7 +20,6 @@ CHECKPOINT_PREFIX = "checkpoints"
 
 # Backwards-compatible aliases for callers that explicitly fetch Needle 2.
 HF_REPO = ENGINE_REPOS[2]
-ENGINE_VERSION = ENGINE_VERSIONS[2]
 
 PLATFORMS = ("macos-arm64", "linux-x86_64", "linux-arm64", "linux-armv7",
              "linux-riscv64", "linux-mipsel", "windows-x86_64", "windows-arm64",
@@ -128,24 +127,29 @@ def cache_dir(generation=2):
                         f"v{int(generation)}", engine_version(generation))
 
 
-def fetch_weights(generation=2, dest_dir=None):
-    """Download the base .cact archive of a generation (cached next to its engine)."""
+def fetch_weights(generation=2, dest_dir=None, force=False):
+    """Download the base .cact archive of a generation (cached next to its engine).
+
+    ``force`` fetches it again even when the cache holds a copy, so every build
+    is a download of the published model.
+    """
     import shutil
     from huggingface_hub import hf_hub_download
 
     name = base_weights(generation)
     dest_dir = dest_dir or cache_dir(generation)
     out = os.path.join(dest_dir, name)
-    if os.path.exists(out):
+    if os.path.exists(out) and not force:
         return out
     _register_download(generation)
-    cached = hf_hub_download(repo_id=engine_repo(generation), filename=name, repo_type="model")
+    cached = hf_hub_download(repo_id=engine_repo(generation), filename=name, repo_type="model",
+                             force_download=force)
     os.makedirs(dest_dir, exist_ok=True)
     shutil.copyfile(cached, out)
     return out
 
 
-def fetch_checkpoint(name, dest_dir, generation=3):
+def fetch_checkpoint(name, dest_dir, generation=3, force=False):
     """Download a training checkpoint (needle3.safetensors, ...) for finetune/build."""
     import shutil
     from huggingface_hub import hf_hub_download
@@ -157,7 +161,8 @@ def fetch_checkpoint(name, dest_dir, generation=3):
     cached = None
     for candidate in (f"{CHECKPOINT_PREFIX}/{base}", base):
         try:
-            cached = hf_hub_download(repo_id=repo, filename=candidate, repo_type="model")
+            cached = hf_hub_download(repo_id=repo, filename=candidate, repo_type="model",
+                                     force_download=force)
             break
         except EntryNotFoundError:
             continue
@@ -181,9 +186,11 @@ def fetch_library(version=None, dest_dir=None, tag=None, generation=2):
     _register_download(generation)
     path = hf_hub_download(repo_id=repo, filename="python/" + wheel, repo_type="model")
     lib = _lib_name_for(tag)
+    stem, suffix = os.path.splitext(lib)
+    member = f"{stem}{generation}{suffix}" if int(generation) >= 3 else lib
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(path) as archive:
-        data = archive.read("needle/" + lib)
+        data = archive.read("needle/" + member)
     out = os.path.join(dest_dir, lib)
     with open(out, "wb") as handle:
         handle.write(data)

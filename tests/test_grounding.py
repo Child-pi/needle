@@ -30,13 +30,17 @@ class _Stub:
 
 
 @pytest.fixture
-def stub(monkeypatch):
+def stub(monkeypatch, tmp_path):
     import needle
 
     engine = _Stub()
-    monkeypatch.setattr(needle, "_lib", lambda generation=2: engine)
-    monkeypatch.setattr(needle, "_library_path", lambda generation=2: "/tmp/libneedle2")
+    base = tmp_path / "needle3.cact"
+    base.write_bytes((0x05E12A84).to_bytes(4, "little") + b"base weights")
+    monkeypatch.setattr(needle, "_lib", lambda generation=3: engine)
+    monkeypatch.setattr(needle, "_library_path", lambda generation=3: "/tmp/libneedle3")
+    monkeypatch.setattr(needle, "_base_weights_path", lambda generation: str(base))
     monkeypatch.setattr(needle, "_active", {})
+    monkeypatch.setattr(needle, "_loaded_base", {})
     return engine
 
 

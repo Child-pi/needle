@@ -33,25 +33,26 @@ needle finetune data.jsonl --epochs 10 --out adapter.safetensors
 needle build checkpoints/needle3.safetensors --lora adapter.safetensors --out tuned.cact
 ```
 
-Checkpoints and adapters are `.safetensors`; pickle files still load. The base is `checkpoints/needle3.safetensors` (the 16-layer Needle 3); `needle3_enterprise.safetensors` is the 20-layer parent it was sliced from and fine-tunes the same way.
-
-## Depth
-
-Needle 3 is a depth ladder: every rung from 2 layers to the full stack was trained as a model, and a rung's blocks are a nested subset of the full stack. `--layers n` slices the base to its n-layer rung before training and fine-tunes that rung at its full depth, the adapter records the depth, and `needle build` exports the same rung (passing a different `--layers` to build is refused). Pick a rung by device budget: fewer layers is proportionally faster and smaller, at some accuracy cost. `needle build --layers n` without an adapter exports an untuned rung.
-
-```sh
-needle finetune data.jsonl --epochs 10 --layers 8 --out adapter.safetensors
-needle build checkpoints/needle3.safetensors --lora adapter.safetensors --out tuned_8l.cact
-```
+Checkpoints and adapters are `.safetensors`; pickle files still load. The base is `checkpoints/needle3.safetensors`, the 20-layer Needle 3.
 
 ```python
 agent = needle.Needle(tools=[...], weights="tuned.cact")
 ```
 
-Fine-tuning is quantization-aware by default. `--qat-bits auto` trains through
-the checkpoint's declared CQ export scheme and records that scheme in the
-adapter; `needle build` rejects a conflicting bit-width override. Use
-`--qat-bits none` only when intentionally targeting float evaluation.
+Fine-tuning is quantisation-aware: LoRA trains through the 4-bit CQ numerics
+`needle build` exports, at the full 20 layers of the base. Every build fetches the
+published `needle3.cact` and packages its tokenizer.
+
+## Depth
+
+Needle 3 is a depth ladder: every rung from 2 to 20 layers is a trained model whose
+blocks are a nested subset of the full stack. `needle build --layers n` merges the
+adapter into the full base and exports the n-layer rung, so one fine-tune serves
+every device budget.
+
+```sh
+needle build checkpoints/needle3.safetensors --lora adapter.safetensors --layers 8 --out tuned_8l.cact
+```
 
 To share a tuned model, set `NEEDLE_HF_REPO=<you>/<model>` and pass `--upload` to `needle build`; on any other machine `needle download <you>/<model>/tuned.cact` pulls it back down (or pass just `<you>/<model>` when the repo holds a single archive).
 
@@ -98,8 +99,6 @@ For a large catalogue, consider two passes at inference instead of more training
 The confidence head. Scores are calibrated for the base model on its training mix and finetuning does not update the head, so the package disables them for tuned weights: `Needle(weights=...)` warns once at construction and reports `confidence` as None. Non English deployments of the base model should also treat the score with caution (correct Spanish calls have been measured at confidence 0.0).
 
 The tokenizer. Non English text fragments into roughly 1.7 times more tokens (measured on Spanish), which taxes both quality and the 256 token window.
-
-Audio input. A tuned `.cact` built by this package ships the text vocabulary and no speech tokenizer, so it answers text only; the base archive keeps audio.
 
 ## Troubleshooting
 

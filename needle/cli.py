@@ -39,8 +39,8 @@ def _download_target(spec):
     if spec.endswith((".safetensors", ".pkl")):
         return "checkpoint", spec
     raise SystemExit(
-        f"unknown download {spec!r}: pass needle3 (base weights), needle3.safetensors or "
-        f"needle3_enterprise.safetensors (a checkpoint to fine-tune), a platform ("
+        f"unknown download {spec!r}: pass needle3 (base weights), needle3.safetensors "
+        f"(the checkpoint to fine-tune), a platform ("
         + ", ".join(fetch.PLATFORMS) + "), or <org>/<repo>[/<file>.cact]")
 
 
@@ -170,13 +170,6 @@ def main():
     p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     p.add_argument("--out", type=str, default=None,
                    help="Output adapter path (.safetensors, or .pkl)")
-    p.add_argument(
-        "--qat-bits", choices=["auto", "none", "2", "4"], default="auto",
-        help="LoRA training numerics: auto matches the checkpoint export scheme "
-             "(default), or force none/2/4")
-    p.add_argument("--layers", type=int, default=None,
-                   help="Fine-tune the N-layer rung of the base (2..L); the adapter "
-                        "and the built .cact keep that depth")
 
     p = sub.add_parser("generate-data")
     p.add_argument("--tools", type=str, default=None, help="Tool schemas JSON to seed generation")
@@ -195,15 +188,13 @@ def main():
     p.add_argument("--lora", type=str, default=None, help="LoRA adapter to merge before export")
     p.add_argument("--out", type=str, default=None, help="Output .cact path")
     p.add_argument("--upload", action="store_true", help="Push the .cact to $NEEDLE_HF_REPO")
-    p.add_argument("--bits", type=str, default=None, choices=["2", "4"])
     p.add_argument("--layers", type=int, default=None,
-                   help="Export the N-layer rung of the checkpoint (an adapter "
-                        "trained with --layers sets this itself)")
+                   help="Export the N-layer rung of the base (2..20); default the full 20")
 
     p = sub.add_parser("download")
     p.add_argument("spec", type=str,
-                   help="needle3 (base weights), needle3.safetensors or "
-                        "needle3_enterprise.safetensors (checkpoints to fine-tune), a platform "
+                   help="needle3 (base weights), needle3.safetensors (the checkpoint to "
+                        "fine-tune), a platform "
                         "folder (e.g. macos-arm64), or a Hugging Face spec: "
                         "<org>/<repo>/<file>.cact, or <org>/<repo> if it holds one archive")
     p.add_argument("--out", type=str, default=".", help="Directory to place the files")
@@ -254,12 +245,15 @@ def main():
         if kind == "platform":
             paths = fetch.download_platform(target, args.out,
                                             generation=args.generation)
+            if args.generation >= 3:
+                paths.append(fetch.fetch_weights(args.generation, os.path.join(args.out, target)))
             for path in paths:
                 print(f"  {'file':<9} {path}  {os.path.getsize(path) / 1e6:.2f} MB")
             runner = next((p for p in paths
                            if os.path.basename(p) in ("needle", "needle.exe")), None)
             if runner:
-                print(f"  {'next':<9} {runner} --tools tools.json --serve")
+                weights = f" --model {fetch.base_weights(args.generation)}" if args.generation >= 3 else ""
+                print(f"  {'next':<9} {runner}{weights} --tools tools.json --serve")
         elif kind == "base":
             os.makedirs(args.out, exist_ok=True)
             path = fetch.fetch_weights(target, args.out)
