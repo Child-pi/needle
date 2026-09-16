@@ -7,6 +7,14 @@ import jax
 import jax.numpy as jnp
 
 
+def _leaf_key(path):
+    """Return the owning parameter key, skipping Flax metadata wrappers."""
+    for entry in reversed(path):
+        if hasattr(entry, "key"):
+            return str(entry.key)
+    return ""
+
+
 def fake_quant(w, group_size=128, bits=4):
     qmax = 2 ** (bits - 1) - 1    
     D = w.shape[-1]
@@ -22,14 +30,6 @@ def fake_quant(w, group_size=128, bits=4):
     return w + jax.lax.stop_gradient(q - w)  
 
 
-def quantize_params(params, group_size=128, bits=4):
-    def q(path, leaf):
-        name = path[-1].key
-        if name in ("kernel", "embedding") and leaf.ndim >= 2:
-            return fake_quant(leaf, group_size, bits)
-        return leaf
-    return jax.tree_util.tree_map_with_path(q, params)
-
 def fake_quant_act(x):
     return fake_quant(x, x.shape[-1], ACT_BITS)
 
@@ -38,11 +38,25 @@ def cq_fake_quant_kv(x, bits, group=64):
     return x + jax.lax.stop_gradient(cq_quantize(x, bits, group) - x)
 
 
+def a8_fake_quant_kv(x):
+    """Per-head symmetric A8 KV quantization matching the native cache."""
+    return fake_quant(x, x.shape[-1], 8)
+
+
+def maybe_quant_query(x, quant):
+    """Per-head A8 query quantization matching the native attention kernel."""
+    if not ACT_BITS:
+        return x
+    return jax.lax.cond(quant, a8_fake_quant_kv, lambda t: t, x)
+
+
 def maybe_quant_kv(x, quant):
     if not KV_BITS:
         return x
+    quantize = (a8_fake_quant_kv if KV_BITS >= 8 else
+                lambda t: cq_fake_quant_kv(t, KV_BITS, _KV_GROUP))
     return jax.lax.cond(
-        quant, lambda t: cq_fake_quant_kv(t, KV_BITS, _KV_GROUP), lambda t: t, x)
+        quant, quantize, lambda t: t, x)
 
 
 QAT_EVERY = 0
@@ -60,7 +74,7 @@ def configure_qat(every, weight_group=128, weight_bits=4):
 
 def configure_deploy(act_bits=8, kv_bits=8, kv_group=64):
     global ACT_BITS, KV_BITS, _KV_GROUP
-    kv_bits = 0 if int(kv_bits) >= 8 else int(kv_bits)
+    kv_bits = int(kv_bits)
     changed = (ACT_BITS, KV_BITS, _KV_GROUP) != (int(act_bits), int(kv_bits), int(kv_group))
     ACT_BITS, KV_BITS, _KV_GROUP = int(act_bits), int(kv_bits), int(kv_group)
     if changed:
@@ -68,7 +82,7 @@ def configure_deploy(act_bits=8, kv_bits=8, kv_group=64):
 
 
 def quantize_params_configured(params):
-    return quantize_params(params, _WEIGHT_GROUP, _WEIGHT_BITS)
+    return cq_ste_params(params, _WEIGHT_BITS, _WEIGHT_GROUP)
 
 
 def deploy_quantize(params, config):
@@ -93,6 +107,9 @@ def maybe_quant_weights(params, do_quantize):
 
 @functools.lru_cache(maxsize=None)
 def _lloyd_max_gaussian(bits, iters=200, samples=400000, seed=0):
+    if bits == 1:
+        c = math.sqrt(2.0 / math.pi)
+        return np.array([-c, c])
     levels = 1 << bits
     x = np.sort(np.random.RandomState(seed).randn(samples))
     c = x[((np.arange(levels) + 0.5) / levels * samples).astype(int)].astype(np.float64)
@@ -148,28 +165,68 @@ def cq_quantize(w, bits, group_size=128, codebook=None):
 
 
 def _is_quant_leaf(path, leaf):
-    key = path[-1].key
+    key = _leaf_key(path)
     return ((key in ("kernel", "embedding") or key.startswith("mhc_phi"))
             and getattr(leaf, "ndim", 0) >= 2)
 
 
 def _reduces_second_last(path):
-    key = path[-1].key
+    key = _leaf_key(path)
     return key == "kernel" or key.startswith("mhc_phi")
 
 
 def cq_quantize_params(params, bits, group_size=128):
-    cb = jnp.asarray(_cq_codebook_np(bits, group_size))
+    return _map_quant_leaves(
+        params, lambda w, i: cq_quantize(w, bits, group_size))
 
-    def q(path, leaf):
-        if not _is_quant_leaf(path, leaf):
-            return leaf
-        if _reduces_second_last(path):
-            rotated = cq_quantize(jnp.swapaxes(leaf, -1, -2), bits, group_size, cb)
-            return jnp.swapaxes(rotated, -1, -2)
-        return cq_quantize(leaf, bits, group_size, cb)
 
-    return jax.tree_util.tree_map_with_path(q, params)
+AB_KEY = "ab_scales"
+
+
+def _ab_of(params):
+    return params.get(AB_KEY) if hasattr(params, "get") else None
+
+
+def ab_init_params(params, seed=0, signs=False):
+    """a = b = 1 (exact no-op at step 0; the PTQ default) or, with signs=True,
+    a = b = random +-1 (randomized-Hadamard init for from-scratch/SFT runs).
+    a*b = 1 either way, so effective FP weights are unchanged. A tree that
+    already carries AB (a resumed QAPT checkpoint) is returned unchanged."""
+    if _ab_of(params):
+        return dict(params)
+    rng = np.random.RandomState(seed)
+    ab = {}
+
+    def visit(path, leaf):
+        if _is_quant_leaf(path, leaf):
+            r = leaf.shape[-2] if _reduces_second_last(path) else leaf.shape[-1]
+            v = ((rng.randint(0, 2, r) * 2 - 1) if signs else np.ones(r))
+            ab[leaf_name(path)] = {"a": jnp.asarray(v, jnp.float32),
+                                   "b": jnp.asarray(v, jnp.float32)}
+        return leaf
+
+    jax.tree_util.tree_map_with_path(visit, params)
+    out = dict(params)
+    out[AB_KEY] = ab
+    return out
+
+
+def freeze_quant_grads(grads):
+    """Zero the gradients of every CQ-quantized leaf (signs stay frozen);
+    norms, gates, AB scales and other smooth params keep theirs."""
+    def z(path, leaf):
+        return jnp.zeros_like(leaf) if _is_quant_leaf(path, leaf) else leaf
+    return jax.tree_util.tree_map_with_path(z, grads)
+
+
+def ab_fold_params(params):
+    """FP-effective tree of an AB-carrying model (w <- a*b*w, AB_KEY dropped):
+    the clean-forward reference of the function the quant transforms deploy."""
+    if not _ab_of(params):
+        return params
+    folded = dict(_map_quant_leaves(params, lambda w, i: w))
+    folded.pop(AB_KEY)
+    return folded
 
 
 def cq_model_bytes(params, bits, group_size=128):
@@ -196,7 +253,7 @@ def model_bytes_fp16(params):
 
 
 CQ_GROUP_SIZE = 128
-CQ_BITS = (2, 3, 4)
+CQ_BITS = (1, 2, 3, 4)
 MIN_BITS, MAX_BITS = 1, 8
 
 
@@ -252,6 +309,9 @@ def add_cq_noise(w, key, scale, group_size=CQ_GROUP_SIZE):
 
 
 def _map_quant_leaves(params, fn):
+    """fn(leaf_with_reduction_axis_last, index) over the CQ-quantized leaves;
+    AB scales, when present, sandwich fn: leaf -> a * fn(b * leaf)."""
+    ab = _ab_of(params)
     counter = [0]
 
     def q(path, leaf):
@@ -259,9 +319,15 @@ def _map_quant_leaves(params, fn):
             return leaf
         i = counter[0]
         counter[0] += 1
+        s = ab.get(leaf_name(path)) if ab else None
+
+        def apply(w):
+            out = fn(w * s["b"] if s else w, i)
+            return out * s["a"] if s else out
+
         if _reduces_second_last(path):
-            return jnp.swapaxes(fn(jnp.swapaxes(leaf, -1, -2), i), -1, -2)
-        return fn(leaf, i)
+            return jnp.swapaxes(apply(jnp.swapaxes(leaf, -1, -2)), -1, -2)
+        return apply(leaf)
 
     return jax.tree_util.tree_map_with_path(q, params)
 
@@ -283,7 +349,13 @@ def noise_params_only(params, key, scale, name, group_size=CQ_GROUP_SIZE):
 
 
 def leaf_name(path):
-    return "/".join(getattr(p, "key", str(p)) for p in path)
+    # Partitioned/AxisMetadata leaves add a trailing GetAttrKey("value").
+    # That is container metadata, not part of the checkpoint parameter name.
+    return "/".join(
+        str(p.key) if hasattr(p, "key") else str(p.idx)
+        for p in path
+        if hasattr(p, "key") or hasattr(p, "idx")
+    )
 
 
 def quant_leaf_names(params):
@@ -355,6 +427,20 @@ def cq_ste(w, bits, group_size=CQ_GROUP_SIZE):
     return w + jax.lax.stop_gradient(cq_quantize(w, bits, group_size) - w)
 
 
+HEAD_BITS = 4
+
+
+def head_weight(w, quant, reduce_second_last=False, group_size=CQ_GROUP_SIZE):
+    """A probe-head matrix as the engine sees it: CQ at HEAD_BITS under QAT,
+    straight-through for the gradient; kernels quantize along their input axis."""
+    def fake(x):
+        if reduce_second_last:
+            return jnp.swapaxes(
+                cq_ste(jnp.swapaxes(x, -1, -2), HEAD_BITS, group_size), -1, -2)
+        return cq_ste(x, HEAD_BITS, group_size)
+    return jax.lax.cond(quant, fake, lambda x: x, w)
+
+
 def cq_ste_params(params, bits, group_size=CQ_GROUP_SIZE):
     return _map_quant_leaves(params, lambda w, i: cq_ste(w, bits, group_size))
 
@@ -364,3 +450,48 @@ def cq_ste_mixed_params(params, bits_map, default_bits, group_size=CQ_GROUP_SIZE
     return _map_quant_leaves(
         params,
         lambda w, i: cq_ste(w, _bits_for(names[i], bits_map, default_bits), group_size))
+
+
+def kurtosis_penalty(params, group_size=None):
+    g = _WEIGHT_GROUP if group_size is None else group_size
+    ab = _ab_of(params)
+    H = jnp.asarray(_cq_hadamard_np(g))
+    terms = []
+
+    def visit(path, leaf):
+        if not _is_quant_leaf(path, leaf):
+            return leaf
+        s = ab.get(leaf_name(path)) if ab else None
+        w = jnp.swapaxes(leaf, -1, -2) if _reduces_second_last(path) else leaf
+        if s is not None:
+            w = w * s["b"]
+        pad = (-w.shape[-1]) % g
+        wp = jnp.pad(w, [(0, 0)] * (w.ndim - 1) + [(0, pad)]) if pad else w
+        rot = wp.reshape(*wp.shape[:-1], -1, g).astype(jnp.float32) @ H
+        m2 = jnp.mean(rot ** 2, axis=-1)
+        m4 = jnp.mean(rot ** 4, axis=-1)
+        kurt = m4 / jnp.maximum(m2 ** 2, 1e-12)
+        dev = (kurt - 3.0) ** 2
+        terms.append((jnp.sum(dev), dev.size))
+        return leaf
+
+    jax.tree_util.tree_map_with_path(visit, params)
+    return sum(t for t, _ in terms) / max(sum(n for _, n in terms), 1)
+
+
+def attractor_penalty(params, bits=None, group_size=None):
+    b = _WEIGHT_BITS if bits is None else bits
+    g = _WEIGHT_GROUP if group_size is None else group_size
+    terms = []
+
+    def fn(w, i):
+        q = jax.lax.stop_gradient(cq_quantize(w, b, g))
+        d = (w - q).astype(jnp.float32)
+        ref = jax.lax.stop_gradient(w.astype(jnp.float32))
+        terms.append((jnp.sum(d * d), jnp.sum(ref * ref)))
+        return w
+
+    _map_quant_leaves(params, fn)
+    num = sum(t for t, _ in terms)
+    den = sum(r for _, r in terms)
+    return num / jnp.maximum(den, 1e-12)

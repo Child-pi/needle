@@ -11,7 +11,7 @@ def test_lora_target_paths_selects_projection_kernels():
             "gate_proj": {"kernel": jnp.ones((2, 8, 8))},
             "q_norm": {"scale": jnp.ones((2, 8))},
         }}}, "final_norm": {"scale": jnp.ones((8,))}},
-        "mtp_combine": {"kernel": jnp.ones((8, 8))},
+        "confidence_head": {"proj": {"kernel": jnp.ones((8, 8))}},
     }
     paths = lora_target_paths(params)
     assert {p[-2] for p in paths} == {"q_proj", "gate_proj"}

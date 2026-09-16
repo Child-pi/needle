@@ -121,7 +121,7 @@ needle finetune data.jsonl --epochs 10
 needle finetune data.jsonl --epochs 10 --generate 300 --lora-rank 16 --lora-alpha 32
 ```
 
-Key options: `--epochs` (default 3), `--lora-rank` (16), `--lora-alpha` (32), `--lr` (1e-4), `--batch-size` (16), `--max-len` (1024), `--val-split` (0.1), `--checkpoint <base.safetensors or .pkl>`, `--checkpoint-dir <dir>` (default `checkpoints`), `--out <adapter.safetensors or .pkl>`, `--generate <n>`, `--model <id>` (default `deepseek/deepseek-v4-flash`), and `--workers <n>` (default 8). `--generate` uses the configured OpenRouter endpoint to synthesize extra examples before training. The adapter is written to `checkpoints/needle_lora.pkl` by default. A validation loss prints each epoch from the held out split.
+Key options: `--epochs` (default 3), `--layers <n>` (fine-tune the n-layer rung of the base, see below), `--lora-rank` (16), `--lora-alpha` (32), `--lr` (1e-4), `--batch-size` (16), `--max-len` (1024), `--val-split` (0.1), `--checkpoint <base.safetensors or .pkl>`, `--checkpoint-dir <dir>` (default `checkpoints`), `--out <adapter.safetensors or .pkl>`, `--generate <n>`, `--model <id>` (default `deepseek/deepseek-v4-flash`), and `--workers <n>` (default 8). `--generate` uses the configured OpenRouter endpoint to synthesize extra examples before training. The adapter is written to `checkpoints/needle_lora.pkl` by default. A validation loss prints each epoch from the held out split.
 
 Training is plain JAX and runs on any accelerator jax supports. On an NVIDIA machine install the CUDA build and the same command trains on the GPU:
 
@@ -135,10 +135,16 @@ On Apple Silicon the `metal` extra trains on the GPU:
 pip install "cactus-needle[train,metal]"
 ```
 
+The base is Needle 3, a depth ladder: every rung from 2 layers up to the full stack is a trained model whose blocks are a nested subset of the full one. `--layers n` slices the base to its n-layer rung before training, trains that rung at full depth, and records the depth in the adapter, so `needle build` exports the same rung. A smaller rung trains and runs faster and fits a smaller device at some accuracy cost; without `--layers` the full base is fine-tuned.
+
+```sh
+needle finetune data.jsonl --epochs 10 --layers 8
+```
+
 **3. Build a tuned `.cact`.** Merge the adapter into the base and quantize. The base auto-downloads if absent.
 
 ```sh
-needle build checkpoints/needle2.pkl --lora checkpoints/needle_lora.safetensors --out my_needle.cact
+needle build checkpoints/needle3.safetensors --lora checkpoints/needle_lora.safetensors --out my_needle.cact
 ```
 
 Add `--bits 2` for a smaller model (by default the export follows the checkpoint's declared per-layer bit map, falling back to 4 when the checkpoint declares none), or set `NEEDLE_HF_REPO=<you>/<model>` and pass `--upload` to publish the `.cact`. The counterpart `needle download <you>/<model>/my_needle.cact` pulls a published archive on any machine, and `needle download <platform>` (e.g. `macos-arm64`) fetches that platform's engine runner.

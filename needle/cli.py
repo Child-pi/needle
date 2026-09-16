@@ -155,6 +155,9 @@ def main():
         "--qat-bits", choices=["auto", "none", "2", "4"], default="auto",
         help="LoRA training numerics: auto matches the checkpoint export scheme "
              "(default), or force none/2/4")
+    p.add_argument("--layers", type=int, default=None,
+                   help="Fine-tune the N-layer rung of the base (2..L); the adapter "
+                        "and the built .cact keep that depth")
 
     p = sub.add_parser("generate-data")
     p.add_argument("--tools", type=str, default=None, help="Tool schemas JSON to seed generation")
@@ -173,6 +176,9 @@ def main():
     p.add_argument("--out", type=str, default=None, help="Output .cact path")
     p.add_argument("--upload", action="store_true", help="Push the .cact to $NEEDLE_HF_REPO")
     p.add_argument("--bits", type=str, default=None, choices=["2", "4"])
+    p.add_argument("--layers", type=int, default=None,
+                   help="Export the N-layer rung of the checkpoint (an adapter "
+                        "trained with --layers sets this itself)")
 
     p = sub.add_parser("download")
     p.add_argument("spec", type=str,

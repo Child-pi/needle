@@ -19,16 +19,34 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 TOOL_RESULT_START = "<tool_result>"
 TOOL_RESULT_END = "</tool_result>"
+CONTEXT_START = "<context>"
+CONTEXT_END = "</context>"
+IMAGE_START = "<image>"
+IMAGE_END = "</image>"
+SPEECH_START = "<speech>"
+SPEECH_END = "</speech>"
+TTS_START = "<tts>"
+TTS_END = "</tts>"
+IMAGEN_START = "<imagen>"
+IMAGEN_END = "</imagen>"
+EXTRACT_START = "<extract>"
+EXTRACT_END = "</extract>"
+SCHEMA_START = "<schema>"
+SCHEMA_END = "</schema>"
 CHAT_MARKERS = [
     IM_START, IM_END, THINK_START, THINK_END,
     TOOLS_START, TOOLS_END, TOOL_CALL_START, TOOL_CALL_END,
     TOOL_RESULT_START, TOOL_RESULT_END,
+    CONTEXT_START, CONTEXT_END, IMAGE_START, IMAGE_END,
+    SPEECH_START, SPEECH_END,
+    TTS_START, TTS_END, IMAGEN_START, IMAGEN_END,
+    EXTRACT_START, EXTRACT_END, SCHEMA_START, SCHEMA_END,
 ]
 IM_START_ID, IM_END_ID, THINK_START_ID, THINK_END_ID = 4, 5, 6, 7
 (TOOLS_START_ID, TOOLS_END_ID, TOOL_CALL_START_ID, TOOL_CALL_END_ID,
  TOOL_RESULT_START_ID, TOOL_RESULT_END_ID) = range(8, 14)
 
-HF_REPO = "Cactus-Compute/needle2"
+HF_REPO = "Cactus-Compute/needle3"
 _HF_TOKENIZER_DIR = "tokenizer"
 
 
@@ -60,6 +78,10 @@ class SANTokenizer:
     @property
     def vocab_size(self):
         return self.sp.GetPieceSize()
+
+    def piece_id(self, piece):
+        i = self.sp.PieceToId(piece)
+        return i if i > 0 else None
 
     def encode(self, text):
         return self.sp.Encode(text, out_type=int)
@@ -110,4 +132,9 @@ def get_tokenizer(vocab_size=None):
                 f"No pretraining tokenizer at {model_path} and HF download failed ({e}). "
                 f"It ships in the {HF_REPO} Hugging Face repo; retry once it is reachable."
             ) from e
-    return SANTokenizer(model_path)
+    tokenizer = SANTokenizer(model_path)
+    if vocab_size is not None and vocab_size < tokenizer.vocab_size:
+        raise ValueError(
+            f"Tokenizer at {model_path} has {tokenizer.vocab_size} pieces, the model "
+            f"vocabulary holds {vocab_size}")
+    return tokenizer

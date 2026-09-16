@@ -116,6 +116,35 @@ def test_auto_qat_preserves_checkpoint_mixed_bit_map(tiny_checkpoint, tmp_path):
                                          upload=False, bits="4"))
 
 
+def test_finetune_on_a_rung_builds_that_depth(tiny_checkpoint, tmp_path):
+    from needle.model.finetune import finetune_local, build_main
+    from needle.model.checkpoints import read_adapter
+    from needle.model.export import read_export
+
+    data = tmp_path / "data.jsonl"
+    _write_data(data)
+    adapter_path = tmp_path / "rung.safetensors"
+    args = _finetune_args(data, tiny_checkpoint, adapter_path, tmp_path / "ck", qat_bits="none")
+    args.layers = 2
+    progress = []
+    finetune_local(args, progress=progress.append)
+    assert any("2 layers" in message for message in progress)
+    adapter = read_adapter(adapter_path)
+    assert adapter["layers"] == 2
+    assert all(v["A"].shape[0] == 2 for v in adapter["lora"].values())
+
+    out = str(tmp_path / "rung.cact")
+    build_main(types.SimpleNamespace(checkpoint=tiny_checkpoint, lora=str(adapter_path),
+                                     out=out, upload=False, bits="4"))
+    header, _ = read_export(out)
+    assert header["num_layers"] == 2
+
+    with pytest.raises(ValueError, match="2-layer rung"):
+        build_main(types.SimpleNamespace(checkpoint=tiny_checkpoint, lora=str(adapter_path),
+                                         out=str(tmp_path / "wrong.cact"), upload=False,
+                                         bits="4", layers=3))
+
+
 def test_finetune_rng_is_controlled_by_seed():
     from needle.model.finetune import _training_rng
 

@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import jax
@@ -8,17 +8,7 @@ import jax.nn.initializers as jinit
 import flax.linen as nn
 
 from . import quantize as _quantize
-from .quantize import fake_quant_act
-
-
-def head_dims(config):
-    legacy = (getattr(config, "attn_dim", 0) or config.d_model) // config.num_heads
-    qk = getattr(config, "qk_head_dim", 0) or legacy
-    v = getattr(config, "v_head_dim", 0) or legacy
-    return qk, v
-
-
-
+from .quantize import fake_quant_act, head_weight
 def _aq(x, quant):
     if quant is False:
         return x
@@ -35,14 +25,6 @@ def residual_init(num_layers):
 
 DTYPE_MAP = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.float16}
 
-PRESETS = {
-    "needle": dict(d_model=768, num_heads=12, num_kv_heads=6, num_layers=27,
-                   engram_layers=(2, 15)),
-}
-PRESETS["base"] = dict(d_model=512, num_heads=8, num_kv_heads=4, num_layers=27,
-                       engram_layers=(2, 15))
-
-
 class ZCRMSNorm(nn.Module):
     epsilon: float = 1e-6
     dtype: jnp.dtype = jnp.bfloat16
@@ -57,23 +39,45 @@ class ZCRMSNorm(nn.Module):
 
 @dataclass
 class TransformerConfig:
-    vocab_size: int = 8192
-    d_model: int = 512
-    attn_dim: int = 0
-    num_heads: int = 8
-    num_kv_heads: int = 4
-    num_layers: int = 12
-    max_seq_len: int = 2048
+    vocab_size: int = 16384
+    d_model: int = 768
+    num_heads: int = 12
+    num_kv_heads: int = 2
+    num_layers: int = 20
+    qk_head_dim: int = 48
+    v_head_dim: int = 64
+    max_seq_len: int = 4096
     pad_token_id: int = 0
-    contrastive_dim: int = 128
+    embedding_dim: int = 128
+    embedding_probes: int = 4
+    embedding_queries: int = 4
+    confidence_probes: int = 4
+    confidence_queries: int = 4
+    router_probes: int = 4
+    router_queries: int = 4
     rope_theta: float = 100000.0
     dtype: str = "bfloat16"
     flash: bool = True
     engram_orders: tuple = (2, 3)
     engram_heads: int = 0
-    engram_slots: int = 8192
-    engram_layers: tuple = (2, 15)
+    engram_slots: int = 18432
+    engram_seed_heads: int = 0
+    engram_layers: tuple = (3, 7, 11, 15, 19)
+    global_layers: tuple = (4, 9, 14, 19)
+    sliding_window: int = 1024
+    ladder_depths: tuple = ()
+    ladder_sample: bool = False
+    ladder_widths: tuple = ()
     mhc_lanes: int = 4
+    qkv_conv_taps: int = 3
+    out_vocab: int = 0
+    image_code_offset: int = 0
+    image_sem_codes: int = 0
+    image_sem_dim: int = 0
+    image_tex_books: int = 0
+    image_tex_codes: int = 0
+    image_tex_stages: int = 0
+    image_tex_dim: int = 0
     kv_window: int = 0
     kv_bits: int = 8
     act_bits: int = 8
@@ -86,12 +90,284 @@ class TransformerConfig:
         for k, v in kwargs.items():
             if k in valid:
                 setattr(self, k, v)
-        self.attn_dim = self.attn_dim or self.d_model
+        legacy_attn = kwargs.get("attn_dim", 0)
+        if legacy_attn:
+            legacy_head = legacy_attn // self.num_heads
+            if "qk_head_dim" not in kwargs:
+                self.qk_head_dim = legacy_head
+            if "v_head_dim" not in kwargs:
+                self.v_head_dim = legacy_head
+            if "sliding_window" not in kwargs:
+                self.sliding_window = 0
+            if "global_layers" not in kwargs:
+                self.global_layers = ()
         self.engram_layers = tuple(self.engram_layers)
+        self.global_layers = tuple(self.global_layers)
+        self.ladder_depths = tuple(self.ladder_depths)
+        self.ladder_widths = tuple(self.ladder_widths)
+
+    @classmethod
+    def from_saved(cls, saved):
+        if not isinstance(saved, dict):
+            saved = dict(saved.__dict__)
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        saved = {k: v for k, v in saved.items() if k in allowed}
+        for key, off in (("qk_head_dim", 0), ("v_head_dim", 0),
+                         ("sliding_window", 0), ("global_layers", ()),
+                         ("ladder_depths", ()), ("ladder_sample", False),
+                         ("ladder_widths", ()), ("engram_seed_heads", 0),
+                         ("qkv_conv_taps", 0), ("out_vocab", 0),
+                         ("image_code_offset", 0), ("image_sem_codes", 0),
+                         ("image_sem_dim", 0), ("image_tex_books", 0),
+                         ("image_tex_codes", 0), ("image_tex_stages", 0),
+                         ("image_tex_dim", 0)):
+            saved.setdefault(key, off)
+        return cls(**saved)
 
     @property
     def jax_dtype(self):
         return DTYPE_MAP[self.dtype]
+
+
+def head_dims(config):
+    legacy = (getattr(config, "attn_dim", 0) or config.d_model) // config.num_heads
+    qk = getattr(config, "qk_head_dim", 0) or legacy
+    v = getattr(config, "v_head_dim", 0) or legacy
+    return qk, v
+
+
+def _ladder_layer_order(num_layers):
+    if num_layers < 1:
+        raise ValueError("models require at least one layer")
+    if num_layers == 1:
+        return (0,)
+    selected = [0, num_layers - 1]
+    order = list(selected)
+    while len(order) < num_layers:
+        selected.sort()
+        _gap, left, right = max(
+            ((right - left, left, right)
+             for left, right in zip(selected, selected[1:])
+             if right - left > 1),
+            key=lambda item: (item[0], -item[1]),
+        )
+        candidate = (left + right) // 2
+        selected.append(candidate)
+        order.append(candidate)
+    return tuple(order)
+
+
+def ladder_layer_indices(num_layers, depth):
+    """Return the stable, nested original-layer indices for a depth rung.
+
+    Every deployable rung keeps both endpoint blocks. Interior blocks are
+    added one at a time by bisecting the largest remaining gap, producing
+    deterministic nested subnetworks with spatially balanced coverage.
+    """
+    if not 2 <= depth <= num_layers:
+        raise ValueError(
+            f"ladder depth must be in [2, {num_layers}], got {depth}")
+    return tuple(sorted(_ladder_layer_order(num_layers)[:depth]))
+
+
+def ladder_layer_ranks(num_layers):
+    """Map each original block to its selection rank in the nested ladder."""
+    order = _ladder_layer_order(num_layers)
+    ranks = [0] * num_layers
+    for rank, layer in enumerate(order):
+        ranks[layer] = rank
+    return tuple(ranks)
+
+
+def ladder_config(config, depth):
+    assert depth < config.num_layers
+    assert tuple(config.engram_layers) == tuple(sorted(config.engram_layers))
+    selected = ladder_layer_indices(config.num_layers, depth)
+    remap = {layer: i for i, layer in enumerate(selected)}
+    fields = dict(config.__dict__)
+    fields["num_layers"] = depth
+    fields["global_layers"] = tuple(
+        remap[l] for l in config.global_layers if l in remap)
+    fields["engram_layers"] = tuple(
+        remap[l] for l in config.engram_layers if l in remap)
+    fields["ladder_depths"] = ()
+    fields["ladder_sample"] = False
+    return TransformerConfig(**fields)
+
+
+def ladder_row_keep(config, exit_depth=None):
+    if exit_depth is None:
+        return None
+    ranks = jnp.asarray(ladder_layer_ranks(config.num_layers), jnp.int32)
+    return jnp.concatenate([jnp.ones((1,), jnp.float32),
+                            (ranks < exit_depth).astype(jnp.float32)])
+
+
+def ladder_slice(params, config, depth):
+    selected = ladder_layer_indices(config.num_layers, depth)
+    selected_set = set(selected)
+    selected_array = jnp.asarray(selected, dtype=jnp.int32)
+    rows = jnp.asarray((0, *(layer + 1 for layer in selected)), jnp.int32)
+    out = {}
+    for k, v in params.items():
+        if k == "stack":
+            out[k] = {sk: (sv if sk == "final_norm"
+                           else jax.tree.map(
+                               lambda a: jnp.take(a, selected_array, axis=0), sv))
+                      for sk, sv in v.items()}
+        elif k in HEAD_KEYS:
+            def take_rows(name, axis):
+                return jax.tree.map(lambda a: jnp.take(a, rows, axis=axis), v[name])
+            out[k] = {**v, "probes": take_rows("probes", 0),
+                      "gain": take_rows("gain", 0), "row_bias": take_rows("row_bias", 1)}
+        elif k.startswith("engrams_"):
+            site = int(k.rsplit("_", 1)[1])
+            if config.engram_layers[site] in selected_set:
+                new_site = sum(
+                    layer in selected_set for layer in config.engram_layers[:site])
+                out[f"engrams_{new_site}"] = v
+        else:
+            out[k] = v
+    return out
+
+
+def parse_ladder_depths(raw):
+    if ".." in raw:
+        lo, hi = raw.split("..")
+        return tuple(range(int(lo), int(hi) + 1)), True
+    return tuple(int(v) for v in raw.split(",") if v), False
+
+
+def parse_ladder_widths(raw):
+    return tuple(int(v) for v in raw.split(",") if v)
+
+
+def width_config(config, w):
+    assert 2 * w == config.d_model
+    assert config.d_model & (config.d_model - 1) == 0
+    assert config.num_heads % 2 == 0
+    assert _hada_blocks(w)[1] == _hada_blocks(config.d_model)[1]
+    orders, heads, _ = engram_geometry(config)
+    if config.engram_layers:
+        assert heads % 2 == 0
+    fields = dict(config.__dict__)
+    fields.update(
+        d_model=w,
+        num_heads=config.num_heads // 2,
+        engram_seed_heads=getattr(config, "engram_seed_heads", 0) or heads,
+        ladder_depths=(),
+        ladder_sample=False,
+        ladder_widths=(),
+    )
+    return TransformerConfig(**fields)
+
+
+def _parameter_path(path):
+    """Return a stable parameter path through optional Flax metadata nodes."""
+    parts = []
+    for entry in path:
+        if hasattr(entry, "key"):
+            parts.append(str(entry.key))
+        elif getattr(entry, "name", None) == "value":
+            continue
+        elif hasattr(entry, "idx"):
+            parts.append(str(entry.idx))
+        else:
+            parts.append(str(entry))
+    return "/".join(parts)
+
+
+def width_slice(params, config, w):
+    D = config.d_model
+    orders, heads, sub_dim = engram_geometry(config)
+    nh = config.num_heads // 2
+    qk_hd, v_hd = head_dims(config)
+    q_cols, o_rows = nh * qk_hd, nh * v_hd
+    ba_c = _hada_blocks(1 << (w - 1).bit_length())[0]
+    kept = (np.concatenate([oi * heads + np.arange(heads // 2)
+                            for oi in range(len(orders))])
+            if config.engram_layers else None)
+    kv_rows = ((kept[:, None] * sub_dim + np.arange(sub_dim)).ravel()
+               if config.engram_layers else None)
+    lane_rows = (np.arange(config.mhc_lanes)[:, None] * D + np.arange(w)).ravel()
+
+    def cut(path, a):
+        p = _parameter_path(path)
+        if p.startswith("ab_scales"):
+            return a
+        if "engrams_" in p:
+            if p.endswith("/embedding"):
+                return a[kept]
+            if p.endswith("key_proj/kernel") or p.endswith("value_proj/kernel"):
+                return a[kv_rows][:, :w]
+            if p.endswith("/taps"):
+                return a[..., :w]
+            return a
+        if ("embedding_head" in p or "confidence_head" in p
+                or "router_head" in p):
+            if p.endswith("/probes") or p.endswith("/query"):
+                return a[..., :w]
+            if p.endswith("proj/kernel"):
+                return a.reshape(-1, D, a.shape[-1])[:, :w].reshape(-1, a.shape[-1])
+            return a
+        if "mhc_phi" in p:
+            return a[:, lane_rows]
+        if "hadamard_mlp" in p:
+            last = p.rsplit("/", 1)[1]
+            if last in ("w1a", "w2a", "w3a"):
+                return a[..., :ba_c, :ba_c]
+            if last in ("d1", "d2", "b2", "d3", "d4"):
+                return a[..., :w]
+            if last == "cond_v":
+                return a[..., :w, :]
+            if last == "cond_u":
+                return a[..., :w]
+            return a
+        if p.endswith("q_proj/kernel"):
+            return a[..., :w, :q_cols]
+        if p.endswith("gate_proj/kernel"):
+            return a[..., :w, :o_rows]
+        if p.endswith("k_proj/kernel") or p.endswith("v_proj/kernel"):
+            return a[..., :w, :]
+        if p.endswith("out_proj/kernel"):
+            return a[..., :o_rows, :w]
+        if p.endswith("/q_taps"):
+            return a[..., :q_cols]
+        if p.endswith("/k_taps") or p.endswith("/v_taps"):
+            return a
+        if p.endswith("q_norm/scale") or p.endswith("k_norm/scale"):
+            return a
+        if p.endswith("/scale"):
+            return a[..., :w]
+        if p == "embedding/embedding":
+            return a[..., :w]
+        if p.endswith("image_projection/kernel"):
+            return a[..., :w]
+        return a
+
+    return jax.tree_util.tree_map_with_path(cut, params)
+
+
+def ladder_pool(config, weight):
+    pool = []
+    for depth in (d for d in config.ladder_depths if d < config.num_layers):
+        dcfg = ladder_config(config, depth)
+        pool.append((depth, config.d_model,
+                     SimpleAttentionNetwork(dcfg).apply,
+                     (lambda p, _d=depth: ladder_slice(p, config, _d)),
+                     weight * depth / config.num_layers))
+        for w in config.ladder_widths:
+            pool.append((depth, w,
+                         SimpleAttentionNetwork(width_config(dcfg, w)).apply,
+                         (lambda p, _d=depth, _dc=dcfg, _w=w:
+                          width_slice(ladder_slice(p, config, _d), _dc, _w)),
+                         weight * (depth / config.num_layers) * (w / config.d_model)))
+    for w in config.ladder_widths:
+        pool.append((config.num_layers, w,
+                     SimpleAttentionNetwork(width_config(config, w)).apply,
+                     (lambda p, _w=w: width_slice(p, config, _w)),
+                     weight * w / config.d_model))
+    return pool
 
 
 def precompute_rope_freqs(head_dim, seq_len, theta=10000.0):
@@ -143,12 +419,13 @@ def _mask_diag(mask, offset):
     return jnp.pad(d, ((0, 0), (offset, 0)))
 
 
-def engram_indices(tokens, orders, heads, slots):
+def engram_indices(tokens, orders, heads, slots, seed_heads=0):
     u = tokens.astype(jnp.uint32)
+    stride = seed_heads or heads
     idx = []
     for oi, order in enumerate(orders):
         for h in range(heads):
-            seed = (_ENGRAM_SEED * (oi * heads + h + 1)) & 0xFFFFFFFF
+            seed = (_ENGRAM_SEED * (oi * stride + h + 1)) & 0xFFFFFFFF
             acc = jnp.full_like(u, jnp.uint32(seed))
             for j in range(order):
                 acc = (acc ^ _shift_right(u, j)) * jnp.uint32(_ENGRAM_PRIME)
@@ -213,23 +490,46 @@ class MultiHeadAttention(nn.Module):
     num_layers: int
     dtype: jnp.dtype = jnp.bfloat16
     flash: bool = True
-    attn_dim: int = 0
+    qk_head_dim: int = 0
+    v_head_dim: int = 0
+    qkv_conv_taps: int = 0
 
     @nn.compact
     def __call__(self, x, mask=None, rope=None, quant=False):
-        attn_dim = self.attn_dim or self.d_model
-        head_dim = attn_dim // self.num_heads
-        kv_dim = self.num_kv_heads * head_dim
+        qk_hd = self.qk_head_dim or self.d_model // self.num_heads
+        v_hd = self.v_head_dim or self.d_model // self.num_heads
+        out_dim = self.num_heads * v_hd
         B = x.shape[0]
 
         x = _aq(x, quant)
-        q = nn.Dense(attn_dim, dtype=self.dtype, use_bias=False, kernel_init=default_init(), name="q_proj")(x)
-        k = nn.Dense(kv_dim, dtype=self.dtype, use_bias=False, kernel_init=default_init(), name="k_proj")(x)
-        v = nn.Dense(kv_dim, dtype=self.dtype, use_bias=False, kernel_init=default_init(), name="v_proj")(x)
+        q = nn.Dense(self.num_heads * qk_hd, dtype=self.dtype, use_bias=False, kernel_init=default_init(), name="q_proj")(x)
+        k = nn.Dense(self.num_kv_heads * qk_hd, dtype=self.dtype, use_bias=False, kernel_init=default_init(), name="k_proj")(x)
+        v = nn.Dense(self.num_kv_heads * v_hd, dtype=self.dtype, use_bias=False, kernel_init=default_init(), name="v_proj")(x)
 
-        q = q.reshape(B, -1, self.num_heads, head_dim).transpose(0, 2, 1, 3)
-        k = k.reshape(B, -1, self.num_kv_heads, head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(B, -1, self.num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+        if self.qkv_conv_taps:
+            n_taps = self.qkv_conv_taps
+            qt = self.param("q_taps", _conv_identity_init,
+                            (n_taps, self.num_heads * qk_hd)).astype(self.dtype)
+            kt = self.param("k_taps", _conv_identity_init,
+                            (n_taps, self.num_kv_heads * qk_hd)).astype(self.dtype)
+            vt = self.param("v_taps", _conv_identity_init,
+                            (n_taps, self.num_kv_heads * v_hd)).astype(self.dtype)
+            tap_ok = [None] + [
+                (_mask_diag(mask, j)[..., None].astype(q.dtype)
+                 if mask is not None else None)
+                for j in range(1, n_taps)]
+
+            def tapped(z, j):
+                shifted = _shift_right(z, j)
+                return shifted if tap_ok[j] is None else shifted * tap_ok[j]
+
+            q = sum(qt[j] * tapped(q, j) for j in range(n_taps))
+            k = sum(kt[j] * tapped(k, j) for j in range(n_taps))
+            v = sum(vt[j] * tapped(v, j) for j in range(n_taps))
+
+        q = q.reshape(B, -1, self.num_heads, qk_hd).transpose(0, 2, 1, 3)
+        k = k.reshape(B, -1, self.num_kv_heads, qk_hd).transpose(0, 2, 1, 3)
+        v = v.reshape(B, -1, self.num_kv_heads, v_hd).transpose(0, 2, 1, 3)
 
         q = ZCRMSNorm(dtype=self.dtype, name="q_norm")(q)
         k = ZCRMSNorm(dtype=self.dtype, name="k_norm")(k)
@@ -239,27 +539,36 @@ class MultiHeadAttention(nn.Module):
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
+        q = _quantize.maybe_quant_query(q, quant)
         k = _quantize.maybe_quant_kv(k, quant)
         v = _quantize.maybe_quant_kv(v, quant)
 
         if self.flash:
+            fused_hd = max(qk_hd, v_hd)
+            qf = q * jnp.asarray(math.sqrt(fused_hd / qk_hd), q.dtype)
+            pad_qk = fused_hd - qk_hd
+            if pad_qk:
+                qf = jnp.pad(qf, ((0, 0), (0, 0), (0, 0), (0, pad_qk)))
+                k = jnp.pad(k, ((0, 0), (0, 0), (0, 0), (0, pad_qk)))
+            pad_v = fused_hd - v_hd
+            vf = jnp.pad(v, ((0, 0), (0, 0), (0, 0), (0, pad_v))) if pad_v else v
             impl = ("cudnn" if jax.default_backend() == "gpu"
                     and q.dtype in (jnp.bfloat16, jnp.float16) else None)
             out = jax.nn.dot_product_attention(
-                q.transpose(0, 2, 1, 3),
+                qf.transpose(0, 2, 1, 3),
                 k.transpose(0, 2, 1, 3),
-                v.transpose(0, 2, 1, 3),
+                vf.transpose(0, 2, 1, 3),
                 mask=mask,
                 implementation=impl,
             )
-            out = out.reshape(B, -1, attn_dim)
+            out = out[..., :v_hd].reshape(B, -1, out_dim)
         else:
             repeats = self.num_heads // self.num_kv_heads
             if repeats > 1:
                 k = jnp.repeat(k, repeats, axis=1)
                 v = jnp.repeat(v, repeats, axis=1)
 
-            scale = jnp.sqrt(jnp.float32(head_dim))
+            scale = jnp.sqrt(jnp.float32(qk_hd))
             attn_weights = jnp.matmul(q, k.transpose(0, 1, 3, 2)) / scale
 
             if mask is not None:
@@ -268,10 +577,10 @@ class MultiHeadAttention(nn.Module):
             attn_weights = nn.softmax(attn_weights, axis=-1)
 
             out = jnp.matmul(attn_weights, v)
-            out = out.transpose(0, 2, 1, 3).reshape(B, -1, attn_dim)
+            out = out.transpose(0, 2, 1, 3).reshape(B, -1, out_dim)
 
         out = out * nn.sigmoid(
-            nn.Dense(attn_dim, dtype=self.dtype, use_bias=False,
+            nn.Dense(out_dim, dtype=self.dtype, use_bias=False,
                      kernel_init=default_init(), name="gate_proj")(x))
         out = _aq(out, quant)
         return nn.Dense(self.d_model, dtype=self.dtype, use_bias=False, kernel_init=residual_init(self.num_layers), name="out_proj")(out)
@@ -284,22 +593,70 @@ def _walsh_matrix(n):
     return jnp.asarray(H / np.sqrt(n))
 
 
+HADA_COND_RANK = 8
+_HADA_PERM_SEEDS = (11, 13)
+
+
+def _hada_blocks(n):
+    b = 1 << ((n - 1).bit_length() // 2)
+    return b, n // b
+
+
+def _hada_perms(n, split=False):
+    if split:
+        h = n // 2
+        return tuple(jnp.asarray(np.concatenate(
+            [np.random.RandomState(s).permutation(h),
+             h + np.random.RandomState(s + 977).permutation(h)]))
+            for s in _HADA_PERM_SEEDS)
+    return tuple(jnp.asarray(np.random.RandomState(s).permutation(n))
+                 for s in _HADA_PERM_SEEDS)
+
+
+def _kron_apply(z, a, b):
+    lead = z.shape[:-1]
+    z = z.reshape(*lead, a.shape[0], b.shape[0])
+    z = jnp.einsum("...ij,ik,jl->...kl", z, a, b)
+    return z.reshape(*lead, a.shape[0] * b.shape[0])
+
+
+def _walsh_init(size):
+    w = _walsh_matrix(size)
+    return lambda key, shape: jnp.asarray(w)
+
+
 class HadamardMLP(nn.Module):
     d_model: int
     dtype: jnp.dtype = jnp.bfloat16
+    split_perms: bool = False
 
     @nn.compact
     def __call__(self, x):
         n = 1 << (self.d_model - 1).bit_length()
-        H = _walsh_matrix(n).astype(self.dtype)
+        ba, bb = _hada_blocks(n)
+        p1, p2 = _hada_perms(n, self.split_perms)
+        factors = [
+            (self.param(f"w{s}a", _walsh_init(ba), (ba, ba)).astype(self.dtype),
+             self.param(f"w{s}b", _walsh_init(bb), (bb, bb)).astype(self.dtype))
+            for s in (1, 2, 3)
+        ]
         d1 = self.param("d1", jinit.ones, (n,)).astype(self.dtype)
         d2 = self.param("d2", jinit.ones, (n,)).astype(self.dtype)
-        d3 = self.param("d3", jinit.constant(0.02), (n,)).astype(self.dtype)
+        b2 = self.param("b2", jinit.zeros, (n,)).astype(self.dtype)
+        d3 = self.param("d3", jinit.ones, (n,)).astype(self.dtype)
+        d4 = self.param("d4", jinit.constant(0.02), (n,)).astype(self.dtype)
+        cond_v = self.param("cond_v", default_init(),
+                            (self.d_model, HADA_COND_RANK)).astype(self.dtype)
+        cond_u = self.param("cond_u", jinit.zeros,
+                            (HADA_COND_RANK, n)).astype(self.dtype)
+
+        cond = 1 + nn.softmax(x @ cond_v, axis=-1) @ cond_u
         pad = n - self.d_model
         z = jnp.pad(x, ((0, 0), (0, 0), (0, pad))) if pad else x
-        z = (d1 * z) @ H
-        z = nn.silu(d2 * z) @ H
-        return (d3 * z)[..., : self.d_model]
+        z = _kron_apply(d1 * z, *factors[0])[..., p1]
+        z = _kron_apply(nn.silu(d2 * cond * z + b2), *factors[1])[..., p2]
+        z = _kron_apply(d3 * z, *factors[2])
+        return (d4 * z)[..., : self.d_model]
 
 
 class Block(nn.Module):
@@ -309,7 +666,10 @@ class Block(nn.Module):
     num_layers: int
     dtype: jnp.dtype = jnp.bfloat16
     flash: bool = True
-    attn_dim: int = 0
+    qk_head_dim: int = 0
+    v_head_dim: int = 0
+    qkv_conv_taps: int = 0
+    hada_split: bool = False
 
     def _gate(self, name):
         return nn.sigmoid(self.param(name, jinit.zeros, ())).astype(self.dtype)
@@ -326,14 +686,17 @@ class Block(nn.Module):
         skip = x
         x = ZCRMSNorm(dtype=self.dtype)(x)
         x = MultiHeadAttention(self.num_heads, self.num_kv_heads, self.d_model, self.num_layers,
-                               self.dtype, self.flash, attn_dim=self.attn_dim,
+                               self.dtype, self.flash, qk_head_dim=self.qk_head_dim,
+                               v_head_dim=self.v_head_dim,
+                               qkv_conv_taps=self.qkv_conv_taps,
                                name="self_attn")(x, mask=mask, rope=rope, quant=quant)
         x = ZCRMSNorm(dtype=self.dtype, name="post_attn_norm")(x)
         x = skip + self._gate("attn_gate") * x
 
         skip = x
         x = ZCRMSNorm(dtype=self.dtype, name="pre_hada_norm")(x)
-        x = HadamardMLP(self.d_model, self.dtype, name="hadamard_mlp")(x)
+        x = HadamardMLP(self.d_model, self.dtype, split_perms=self.hada_split,
+                        name="hadamard_mlp")(x)
         return skip + x
 
 
@@ -345,30 +708,71 @@ class _ScanBody(nn.Module):
     dtype: jnp.dtype = jnp.bfloat16
     flash: bool = True
     collect_hidden: bool = False
-    attn_dim: int = 0
+    qk_head_dim: int = 0
+    v_head_dim: int = 0
+    qkv_conv_taps: int = 0
+    hada_split: bool = False
+    capture_subnetwork: bool = False
+    subnetwork_only: bool = False
 
     @nn.compact
-    def __call__(self, x, xs, mask, rope, quant, engram_kv):
-        site_flags, hc = xs
+    def __call__(self, carry, xs, mask, local_mask, rope, quant, engram_kv,
+                 exit_depth):
+        if self.capture_subnetwork:
+            x, sub_x = carry
+        else:
+            x = carry
+        site_flags, gflag, hc, layer_rank = xs
+        if local_mask is not None:
+            mask = jnp.where(gflag > 0, mask, local_mask)
         block = Block(
             self.num_heads, self.num_kv_heads, self.d_model, self.num_layers,
-            self.dtype, self.flash, attn_dim=self.attn_dim,
-            name="block",
+            self.dtype, self.flash, qk_head_dim=self.qk_head_dim,
+            v_head_dim=self.v_head_dim, qkv_conv_taps=self.qkv_conv_taps,
+            hada_split=self.hada_split, name="block",
         )
-        B, T, n, C = x.shape
-        xf = x.astype(jnp.float32)
-        nx = _rms_unit(x.reshape(B, T, n * C))
-        hpre = nn.sigmoid(hc["a_pre"] * (nx @ hc["phi_pre"].astype(jnp.float32))
-                          + hc["b_pre"] + hc["pre_off"])
-        u = jnp.einsum("btn,btnc->btc", hpre, xf).astype(self.dtype)
-        y = block(u, mask=mask, rope=rope, quant=quant,
-                  engram_kv=engram_kv, site_flags=site_flags) - u
-        hpost = 2 * nn.sigmoid(hc["a_post"] * (nx @ hc["phi_post"].astype(jnp.float32))
-                               + hc["b_post"] + hc["post_off"])
-        res = nx @ hc["phi_res"].astype(jnp.float32)
-        hres = _sinkhorn(hc["a_res"] * res.reshape(B, T, n, n) + hc["b_res"])
-        new_x = (jnp.einsum("btij,btjc->btic", hres, xf)
-                 + hpost[..., None] * y.astype(jnp.float32)[:, :, None, :]).astype(self.dtype)
+        def advance(stream, pre_off, post_off, block_module):
+            B, T, n, C = stream.shape
+            xf = stream.astype(jnp.float32)
+            nx = _aq(_rms_unit(stream.reshape(B, T, n * C)), quant)
+            hpre = nn.sigmoid(
+                hc["a_pre"] * (nx @ hc["phi_pre"].astype(jnp.float32))
+                + hc["b_pre"] + pre_off)
+            u = jnp.einsum("btn,btnc->btc", hpre, xf).astype(self.dtype)
+            y = block_module(u, mask=mask, rope=rope, quant=quant,
+                             engram_kv=engram_kv, site_flags=site_flags) - u
+            hpost = 2 * nn.sigmoid(
+                hc["a_post"] * (nx @ hc["phi_post"].astype(jnp.float32))
+                + hc["b_post"] + post_off)
+            res = nx @ hc["phi_res"].astype(jnp.float32)
+            hres = _sinkhorn(
+                hc["a_res"] * res.reshape(B, T, n, n) + hc["b_res"])
+            return (jnp.einsum("btij,btjc->btic", hres, xf)
+                    + hpost[..., None]
+                    * y.astype(jnp.float32)[:, :, None, :]).astype(self.dtype)
+
+        if self.subnetwork_only:
+            new_x = nn.cond(
+                layer_rank < exit_depth,
+                lambda mdl, stream: advance(
+                    stream, hc["sub_pre_off"], hc["sub_post_off"], mdl),
+                lambda _mdl, stream: stream,
+                block,
+                x,
+            )
+        else:
+            new_x = advance(x, hc["pre_off"], hc["post_off"], block)
+        if self.capture_subnetwork:
+            sub_x = nn.cond(
+                layer_rank < exit_depth,
+                lambda mdl, stream: advance(
+                    stream, hc["sub_pre_off"], hc["sub_post_off"], mdl),
+                lambda _mdl, stream: stream,
+                block,
+                sub_x,
+            )
+            out = jnp.mean(sub_x, axis=2) if self.collect_hidden else None
+            return (new_x, sub_x), out
         out = jnp.mean(new_x, axis=2) if self.collect_hidden else None
         return new_x, out
 
@@ -377,8 +781,9 @@ class Stack(nn.Module):
     config: TransformerConfig
 
     @nn.compact
-    def __call__(self, x, mask=None, rope=None, engram_kv=None, collect_hidden=False,
-                 quant=False):
+    def __call__(self, x, mask=None, rope=None, engram_kv=None,
+                 collect_hidden=False, quant=False, exit_depth=None,
+                 subnetwork_only=False):
         cfg = self.config
         dt = cfg.jax_dtype
         x = x.astype(dt)
@@ -389,6 +794,15 @@ class Stack(nn.Module):
             for s, layer in enumerate(cfg.engram_layers):
                 flags[layer, s] = 1.0
             site_flags = jnp.asarray(flags)
+
+        local_mask, gflags = None, jnp.zeros((cfg.num_layers,), jnp.float32)
+        if cfg.sliding_window and mask is not None:
+            T = x.shape[1]
+            pos = jnp.arange(T)
+            band = ((pos[:, None] - pos[None, :]) < cfg.sliding_window)[None, None]
+            local_mask = mask & band
+            gflags = jnp.asarray([1.0 if i in cfg.global_layers else 0.0
+                                  for i in range(cfg.num_layers)])
 
         n, L, nC = cfg.mhc_lanes, cfg.num_layers, cfg.mhc_lanes * cfg.d_model
         lane = np.eye(n, dtype=np.float32)[np.arange(L) % n]
@@ -406,73 +820,188 @@ class Stack(nn.Module):
             "post_off": jnp.asarray(-4 * (1 - lane)),
         }
         x = jnp.broadcast_to(x[:, :, None, :], (*x.shape[:2], n, x.shape[-1]))
+        if subnetwork_only and exit_depth is None:
+            raise ValueError("subnetwork_only requires exit_depth")
+        capture_subnetwork = exit_depth is not None and not subnetwork_only
+        if capture_subnetwork:
+            carry = (x, x)
+        else:
+            carry = x
+
+        layer_ranks = jnp.asarray(ladder_layer_ranks(L), dtype=jnp.int32)
+        if exit_depth is not None:
+            active = layer_ranks < exit_depth
+            sub_positions = jnp.cumsum(active.astype(jnp.int32)) - 1
+            sub_lane = jax.nn.one_hot(
+                jnp.mod(sub_positions, n), n, dtype=jnp.float32)
+            hc["sub_pre_off"] = 8 * sub_lane - 4
+            hc["sub_post_off"] = -4 * (1 - sub_lane)
+        else:
+            sub_positions = jnp.zeros((L,), dtype=jnp.int32)
+            hc["sub_pre_off"] = hc["pre_off"]
+            hc["sub_post_off"] = hc["post_off"]
 
         ScanBlock = nn.scan(
             nn.remat(_ScanBody) if cfg.remat else _ScanBody,
             variable_axes={"params": 0},
             split_rngs={"params": True},
+            metadata_params={nn.PARTITION_NAME: "layers"},
             length=cfg.num_layers,
-            in_axes=(0, nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
             unroll=cfg.scan_unroll,
+            in_axes=(0, nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast,
+                     nn.broadcast, nn.broadcast),
         )
-        x, hidden = ScanBlock(
+        carry, hidden = ScanBlock(
             cfg.num_heads, cfg.num_kv_heads, cfg.d_model, cfg.num_layers, dt,
-            cfg.flash, collect_hidden, attn_dim=cfg.attn_dim,
+            cfg.flash, collect_hidden, qk_head_dim=cfg.qk_head_dim,
+            v_head_dim=cfg.v_head_dim,
+            qkv_conv_taps=getattr(cfg, "qkv_conv_taps", 0),
+            hada_split=bool(getattr(cfg, "ladder_widths", ())),
+            capture_subnetwork=capture_subnetwork,
+            subnetwork_only=subnetwork_only,
             name="layers",
-        )(x, (site_flags, hc), mask, rope, quant, engram_kv)
+        )(carry, (site_flags, gflags, hc, layer_ranks),
+          mask, local_mask, rope, quant, engram_kv,
+          jnp.int32(0) if exit_depth is None else exit_depth)
 
+        if capture_subnetwork:
+            x, sub_x = carry
+        else:
+            x = carry
         x = jnp.mean(x, axis=2)
-        x = ZCRMSNorm(dtype=dt, name="final_norm")(x)
+        final_norm = ZCRMSNorm(dtype=dt, name="final_norm")
+        if capture_subnetwork:
+            sub_x = jnp.mean(sub_x, axis=2)
+            both = final_norm(jnp.concatenate((x, sub_x), axis=0))
+            x, sub_x = jnp.split(both, 2, axis=0)
+            return x, hidden, sub_x
+        x = final_norm(x)
         return x, hidden
 
 
-def probe_pool(cells, probes, keep=None, dtype=jnp.bfloat16):
-    b, t, l, d = cells.shape
-    cells = cells.reshape(b, t * l, d)
-    if keep is not None:
-        keep = jnp.repeat(keep, l, axis=1)
-    scores = jnp.einsum("bcd,kd->bkc", cells.astype(jnp.float32),
+def probe_pool(cells, keep, probes, gain, query, bias, row_keep=None,
+               dtype=jnp.bfloat16):
+    cf = cells.astype(jnp.float32)
+    b, t, l1, d = cf.shape
+    k, q = probes.shape[1], query.shape[0]
+    scores = jnp.einsum("btld,lkd->blkt", cf,
                         probes.astype(jnp.float32)) / math.sqrt(d)
     if keep is not None:
-        scores = jnp.where(keep[:, None, :] > 0, scores, -jnp.inf)
-    w = jax.nn.softmax(scores, axis=-1)
-    return jnp.einsum("bkc,bcd->bkd", w, cells.astype(jnp.float32)
-                      ).reshape(b, -1).astype(dtype)
+        scores = jnp.where(keep[:, None, None, :] > 0, scores, -jnp.inf)
+    r = jnp.einsum("blkt,btld->blkd", jax.nn.softmax(scores, axis=-1), cf)
+    r = _rms_unit(r) * gain.astype(jnp.float32)[None, :, :, None]
+    u = (jnp.einsum("blkd,qd->bqlk", r, query.astype(jnp.float32))
+         / math.sqrt(d) + bias.astype(jnp.float32)[None])
+    if row_keep is not None:
+        u = jnp.where(row_keep[None, None, :, None] > 0, u, -jnp.inf)
+    w = jax.nn.softmax(u.reshape(b, q, l1 * k), axis=-1)
+    return jnp.einsum("bqm,bmd->bqd", w, r.reshape(b, l1 * k, d)
+                      ).reshape(b, q * d).astype(dtype)
 
 
-class ContrastiveHead(nn.Module):
-    d_model: int
-    out_dim: int
-    dtype: jnp.dtype = jnp.bfloat16
-    temp_init: float = 0.07
+def head_config(config, key, probes, queries):
+    name = key.removesuffix("_head")
+    return replace(config, **{f"{name}_probes": probes, f"{name}_queries": queries})
 
-    PROBES = 4
+
+class HeadProjection(nn.Module):
+    features: int
+    use_bias: bool = True
+    dtype: jnp.dtype = None
 
     @nn.compact
-    def __call__(self, cells, keep=None):
-        pooled = probe_pool(cells, self.param("probes", default_init(),
-                                              (self.PROBES, cells.shape[-1])),
-                            keep, self.dtype)
-        p = nn.Dense(self.out_dim, dtype=self.dtype, use_bias=False,
-                     kernel_init=default_init(), name="proj")(pooled)
+    def __call__(self, x, quant=False):
+        kernel = head_weight(
+            self.param("kernel", default_init(), (x.shape[-1], self.features)),
+            quant, reduce_second_last=True)
+        if self.dtype is not None:
+            x, kernel = x.astype(self.dtype), kernel.astype(self.dtype)
+        y = x @ kernel
+        if self.use_bias:
+            bias = self.param("bias", jinit.zeros, (self.features,))
+            y = y + (bias.astype(self.dtype) if self.dtype is not None else bias)
+        return y
+
+
+class ProbeHead(nn.Module):
+    config: TransformerConfig
+    dtype: jnp.dtype = None
+    key = ""
+    code = 0
+    out_dim = 0
+
+    @classmethod
+    def export(cls, head):
+        kernel = np.asarray(head["proj"]["kernel"]).T
+        bias = (np.asarray(head["proj"]["bias"]) if "bias" in head["proj"]
+                else np.zeros(kernel.shape[0], np.float16))
+        return [(f"{cls.key}.probes", np.asarray(head["probes"])),
+                (f"{cls.key}.gain", np.asarray(head["gain"])),
+                (f"{cls.key}.query", np.asarray(head["query"])),
+                (f"{cls.key}.row_bias", np.asarray(head["row_bias"])),
+                (f"{cls.key}.proj", kernel),
+                (f"{cls.key}.bias", bias)]
+
+    def pooled(self, cells, keep, row_keep, quant=False):
+        name = self.key.removesuffix("_head")
+        l1, d = cells.shape[2], cells.shape[3]
+        k, q = getattr(self.config, f"{name}_probes"), getattr(self.config, f"{name}_queries")
+        return probe_pool(cells, keep,
+                          head_weight(self.param("probes", default_init(), (l1, k, d)), quant),
+                          self.param("gain", jinit.ones, (l1, k)),
+                          head_weight(self.param("query", default_init(), (q, d)), quant),
+                          self.param("row_bias", jinit.zeros, (q, l1, k)),
+                          row_keep, self.dtype or self.config.jax_dtype)
+
+    @nn.compact
+    def __call__(self, cells, keep=None, row_keep=None, quant=False):
+        logits = HeadProjection(self.out_dim, dtype=self.dtype or self.config.jax_dtype,
+                                use_bias=True, name="proj")(
+            self.pooled(cells, keep, row_keep, quant), quant)
+        return logits.astype(jnp.float32)
+
+
+class ConfidenceHead(ProbeHead):
+    key, code, out_dim = "confidence_head", 2, 1
+
+
+class RouterHead(ProbeHead):
+    key, code, out_dim = "router_head", 3, 3
+    calibration_init = (0.90, 0.00, 0.60)
+
+    @classmethod
+    def export(cls, head):
+        calibration = np.asarray(head.get("calibration", cls.calibration_init), np.float16)
+        return super().export(head) + [(f"{cls.key}.calibration", calibration)]
+
+
+class EmbeddingHead(ProbeHead):
+    key, code = "embedding_head", 1
+    temp_init: float = 10.0
+    bias_init: float = -10.0
+
+    @nn.compact
+    def __call__(self, cells, keep=None, row_keep=None, quant=False):
+        p = HeadProjection(self.config.embedding_dim, dtype=self.dtype or self.config.jax_dtype,
+                           use_bias=False, name="proj")(
+            self.pooled(cells, keep, row_keep, quant), quant)
         log_temp = self.param("log_temp", jinit.constant(math.log(self.temp_init)), ())
+        bias = self.param("bias", jinit.constant(self.bias_init), ())
         denom = jnp.sqrt(jnp.sum(p.astype(jnp.float32) ** 2, axis=-1, keepdims=True) + 1e-12)
-        return (p / denom.astype(p.dtype)), log_temp
+        return p / denom.astype(p.dtype), log_temp, bias
 
 
-class ConfidenceHead(nn.Module):
-    dtype: jnp.dtype = jnp.bfloat16
+HEADS = (EmbeddingHead, ConfidenceHead, RouterHead)
+HEAD_KEYS = tuple(head.key for head in HEADS)
 
-    PROBES = 8
 
-    @nn.compact
-    def __call__(self, cells, keep=None):
-        pooled = probe_pool(cells, self.param("probes", default_init(),
-                                              (self.PROBES, cells.shape[-1])),
-                            keep, self.dtype)
-        logit = nn.Dense(1, dtype=self.dtype, use_bias=True,
-                         kernel_init=default_init(), name="proj")(pooled)
-        return logit[..., 0].astype(jnp.float32)
+def init_head(params, model, head, seed):
+    cfg = model.config
+    f32 = lambda tree: jax.tree.map(lambda x: jnp.asarray(x, jnp.float32), tree)
+    dummy = jnp.zeros((1, 8, cfg.num_layers + 1, cfg.d_model))
+    init = head.init({"params": jax.random.PRNGKey(seed)}, dummy,
+                     keep=jnp.ones((1, 8)))["params"]
+    return f32({k: v for k, v in params.items() if k != head.key}), {head.key: f32(init)}
 
 
 class SimpleAttentionNetwork(nn.Module):
@@ -481,11 +1010,25 @@ class SimpleAttentionNetwork(nn.Module):
     def setup(self):
         cfg = self.config
         self.embedding = nn.Embed(cfg.vocab_size, cfg.d_model, embedding_init=jinit.normal(stddev=0.02))
+        if cfg.image_sem_codes:
+            if (cfg.image_sem_dim <= 0 or cfg.image_tex_books <= 0
+                    or cfg.image_tex_codes <= 0 or cfg.image_tex_stages <= 0
+                    or cfg.image_tex_dim <= 0):
+                raise ValueError("incomplete composite-image embedding geometry")
+            self.image_sem_embedding = nn.Embed(
+                cfg.image_sem_codes, cfg.image_sem_dim,
+                embedding_init=jinit.normal(stddev=0.02))
+            self.image_texture_embedding = nn.Embed(
+                cfg.image_tex_books * cfg.image_tex_codes * cfg.image_tex_stages,
+                cfg.image_tex_dim, embedding_init=jinit.normal(stddev=0.02))
+            self.image_projection = nn.Dense(
+                cfg.d_model, use_bias=False, kernel_init=default_init())
+            self.image_input_norm = ZCRMSNorm(dtype=cfg.jax_dtype)
         self.embed_scale = math.sqrt(cfg.d_model)
         self.stack = Stack(cfg)
-        self.contrastive_head = ContrastiveHead(
-            cfg.d_model, cfg.contrastive_dim, cfg.jax_dtype)
-        self.confidence_head = ConfidenceHead(cfg.jax_dtype)
+        self.embedding_head = EmbeddingHead(cfg)
+        self.confidence_head = ConfidenceHead(cfg)
+        self.router_head = RouterHead(cfg)
         assert all(l < cfg.num_layers for l in cfg.engram_layers)
         orders, heads, sub_dim = engram_geometry(cfg)
         self.engrams = [
@@ -493,52 +1036,93 @@ class SimpleAttentionNetwork(nn.Module):
                    sub_dim, cfg.num_layers, max(orders), cfg.jax_dtype)
             for _ in cfg.engram_layers
         ]
-        self.mtp_combine = nn.Dense(cfg.d_model, dtype=cfg.jax_dtype, use_bias=False,
-                                    kernel_init=default_init())
-        self.mtp_block = Block(cfg.num_heads, cfg.num_kv_heads, cfg.d_model,
-                               cfg.num_layers, cfg.jax_dtype, cfg.flash,
-                               attn_dim=cfg.attn_dim)
-        self.mtp_emb_norm = ZCRMSNorm(dtype=cfg.jax_dtype)
-        self.mtp_final_norm = ZCRMSNorm(dtype=cfg.jax_dtype)
 
     def _rope(self, seq_len):
         cfg = self.config
-        head_dim = (cfg.attn_dim or cfg.d_model) // cfg.num_heads
-        return precompute_rope_freqs(head_dim, seq_len, cfg.rope_theta)
+        qk_hd, _ = head_dims(cfg)
+        return precompute_rope_freqs(qk_hd, seq_len, cfg.rope_theta)
 
     def _engram_kv(self, tokens, mask, quant):
         if not self.engrams:
             return None
         orders, heads, _ = engram_geometry(self.config)
-        indices = engram_indices(tokens, orders, heads, self.config.engram_slots)
+        indices = engram_indices(tokens, orders, heads, self.config.engram_slots,
+                                 getattr(self.config, "engram_seed_heads", 0))
         ngram_ok = jnp.stack([_mask_diag(mask, o - 1) for o in orders for _ in range(heads)],
                              axis=-1)
         tap_ok = jnp.stack([_mask_diag(mask, j * max(orders)) for j in range(ENGRAM_CONV_TAPS)])
         pairs = [e(indices, ngram_ok, tap_ok, quant=quant) for e in self.engrams]
         return jnp.stack([k for k, _ in pairs]), jnp.stack([v for _, v in pairs])
 
-    def __call__(self, tokens, mask=None, quant=False, return_mtp=False):
+    def _input_embeddings(self, tokens, image_texture=None):
+        cfg = self.config
+        x = self.embedding(tokens) * self.embed_scale
+        if image_texture is None:
+            if not (self.is_initializing() and cfg.image_sem_codes):
+                return x
+            image_texture = jnp.full(
+                tokens.shape + (cfg.image_tex_books * cfg.image_tex_stages,),
+                255, dtype=jnp.uint8)
+        if not cfg.image_sem_codes:
+            raise ValueError("image components were provided to a text-only model")
+        expected = cfg.image_tex_books * cfg.image_tex_stages
+        if image_texture.shape != tokens.shape + (expected,):
+            raise ValueError(
+                f"image components must have shape tokens+({expected},)")
+        active = image_texture[..., 0] != 255
+        texture = jnp.where(active[..., None], image_texture, 0).astype(jnp.int32)
+        semantic = jnp.clip(
+            tokens.astype(jnp.int32) - cfg.image_code_offset,
+            0, cfg.image_sem_codes - 1)
+        sem = self.image_sem_embedding(semantic)
+        offsets = (jnp.arange(expected, dtype=jnp.int32)
+                   * cfg.image_tex_codes)
+        tex = self.image_texture_embedding(texture + offsets)
+        tex = tex.reshape(
+            *tokens.shape, cfg.image_tex_stages, cfg.image_tex_books,
+            cfg.image_tex_dim).sum(axis=-3)
+        composite = jnp.concatenate(
+            [sem, tex.reshape(*tokens.shape,
+                              cfg.image_tex_books * cfg.image_tex_dim)],
+            axis=-1)
+        image_x = self.image_projection(composite)
+        image_x = (self.image_input_norm(image_x)
+                   * (0.02 * self.embed_scale)).astype(x.dtype)
+        return jnp.where(active[..., None], image_x, x)
+
+    def __call__(self, tokens, mask=None, quant=False,
+                 image_texture=None, exit_depth=None, exit_only=False,
+                 subnetwork_only=False):
         if mask is None:
             mask = make_causal_mask(tokens.shape[1])
-        x = self.embedding(tokens) * self.embed_scale
+        x = self._input_embeddings(tokens, image_texture)
         rope = self._rope(tokens.shape[1])
         engram_kv = self._engram_kv(tokens, mask, quant)
-        x, _ = self.stack(x, mask=mask, rope=rope, engram_kv=engram_kv, quant=quant)
-        logits = _aq(x, quant).astype(jnp.float32) @ self.embedding.embedding.T
-        if not (return_mtp or self.is_initializing()):
-            return logits
+        stack_out = self.stack(
+            x, mask=mask, rope=rope, engram_kv=engram_kv, quant=quant,
+            exit_depth=exit_depth, subnetwork_only=subnetwork_only)
+        if subnetwork_only:
+            x, _ = stack_out
+            exit_x = None
+        elif exit_depth is None:
+            x, _ = stack_out
+            exit_x = None
+        else:
+            x, _, exit_x = stack_out
+        head = self.embedding.embedding
+        if self.config.out_vocab:
+            head = head[: self.config.out_vocab]
+        if subnetwork_only:
+            return _aq(x, quant).astype(jnp.float32) @ head.T
+        if exit_x is not None:
+            exit_logits = _aq(exit_x, quant).astype(jnp.float32) @ head.T
+            if exit_only:
+                return exit_logits
+        logits = _aq(x, quant).astype(jnp.float32) @ head.T
+        return (logits, exit_logits) if exit_x is not None else logits
 
-        nxt = jnp.pad(tokens[:, 1:], ((0, 0), (0, 1)))
-        e2 = self.mtp_emb_norm(self.embedding(nxt) * self.embed_scale)
-        m = self.mtp_combine(_aq(jnp.concatenate([x, e2], axis=-1), quant))
-        m = self.mtp_block(m, mask=mask, rope=rope, quant=quant)
-        m = self.mtp_final_norm(m)
-        mtp_logits = _aq(m, quant).astype(jnp.float32) @ self.embedding.embedding.T
-        if not return_mtp:
-            return logits
-        return logits, mtp_logits
-
-    def hidden_cells(self, tokens, quant=False, window=0, sink=None):
+    def hidden_cells(self, tokens, quant=False, window=0, sink=None,
+                     image_texture=None, exit_depth=None):
         cfg = self.config
         mask = (make_causal_mask(tokens.shape[1])
                 & make_padding_mask(tokens, cfg.pad_token_id))
@@ -547,41 +1131,45 @@ class SimpleAttentionNetwork(nn.Module):
             recent = ((pos[:, None] - pos[None, :]) < window)[None, None, :, :]
             keep = recent if sink is None else (recent | sink[:, None, None, :])
             mask = mask & keep
-        x0 = self.embedding(tokens) * self.embed_scale
+        x0 = self._input_embeddings(tokens, image_texture)
         rope = self._rope(tokens.shape[1])
         engram_kv = self._engram_kv(tokens, mask, quant)
-        _, hidden = self.stack(x0, mask=mask, rope=rope, engram_kv=engram_kv,
-                               quant=quant, collect_hidden=True)
+        hidden = self.stack(
+            x0, mask=mask, rope=rope, engram_kv=engram_kv,
+            quant=quant, collect_hidden=True, exit_depth=exit_depth)[1]
         return jnp.stack([x0, *hidden], axis=2)
 
-    def _encode_contrastive(self, tokens, quant=False, window=0, sink=None):
+    def _head_cells(self, tokens, quant=False, window=0, sink=None,
+                    exit_depth=None):
         cells = jax.lax.stop_gradient(
-            self.hidden_cells(tokens, quant=quant, window=window, sink=sink))
+            self.hidden_cells(tokens, quant=quant, window=window, sink=sink,
+                              exit_depth=exit_depth))
         keep = (tokens != self.config.pad_token_id).astype(jnp.float32)
-        return self.contrastive_head(cells, keep=keep)
+        return cells, keep, ladder_row_keep(self.config, exit_depth)
 
-    def encode_contrastive(self, tokens, quant=False, window=0, sink=None):
-        return self._encode_contrastive(tokens, quant=quant, window=window,
-                                        sink=sink)[0]
+    def forward_embedding(self, tokens, quant=False, window=0, sink=None,
+                           exit_depth=None):
+        return self.embedding_head(
+            *self._head_cells(tokens, quant, window, sink, exit_depth), quant=quant)[0]
 
-    def forward_contrastive(self, query_tokens, tool_tokens, quant=False):
-        q_emb, log_temp = self._encode_contrastive(query_tokens, quant=quant)
-        t_emb, _ = self._encode_contrastive(tool_tokens, quant=quant)
-        return q_emb, t_emb, log_temp
+    def forward_confidence(self, tokens, quant=False, window=0, sink=None,
+                           exit_depth=None):
+        return self.confidence_head(
+            *self._head_cells(tokens, quant, window, sink, exit_depth), quant=quant)[..., 0]
 
-    def forward_confidence(self, tokens, quant=False, window=0, sink=None):
-        cells = jax.lax.stop_gradient(
-            self.hidden_cells(tokens, quant=quant, window=window, sink=sink))
-        keep = (tokens != self.config.pad_token_id).astype(jnp.float32)
-        return self.confidence_head(cells, keep=keep)
+    def forward_router(self, tokens, quant=False, window=0, sink=None,
+                       exit_depth=None):
+        return self.router_head(
+            *self._head_cells(tokens, quant, window, sink, exit_depth), quant=quant)
 
-    def hidden_states(self, tokens, mask=None):
+    def hidden_states(self, tokens, mask=None, image_texture=None):
         if mask is None:
             mask = make_causal_mask(tokens.shape[1])
-        x = self.embedding(tokens) * self.embed_scale
+        x = self._input_embeddings(tokens, image_texture)
         rope = self._rope(tokens.shape[1])
         engram_kv = self._engram_kv(tokens, mask, False)
-        _, hidden = self.stack(x, mask=mask, rope=rope, engram_kv=engram_kv, collect_hidden=True)
+        _, hidden = self.stack(x, mask=mask, rope=rope, engram_kv=engram_kv,
+                               collect_hidden=True)
         return hidden.astype(jnp.float32)
 
 
@@ -601,12 +1189,25 @@ KV_WINDOW_MIN = 160
 
 
 def kv_budget_window(config):
-    head_dim = (getattr(config, "attn_dim", 0) or config.d_model) // config.num_heads
-    kv = config.num_kv_heads * head_dim
+    qk_hd, v_hd = head_dims(config)
+    kd = config.num_kv_heads * qk_hd
+    vd = config.num_kv_heads * v_hd
     d, L = config.d_model, config.num_layers
     sites = len(tuple(getattr(config, "engram_layers", (2, 15))))
-    per_pos = (L * (2 * kv + 2 * (kv // KV_GROUP) * 4)
-               + sites * (d + (d // KV_GROUP) * 4))
+    per_layer = kd + vd + (kd // KV_GROUP + vd // KV_GROUP) * 4
+    per_site = d + (d // KV_GROUP) * 4
+    sw = getattr(config, "sliding_window", 0)
+    if sw:
+        n_global = len(tuple(getattr(config, "global_layers", ())))
+        local = min(sw, config.max_seq_len)
+        fixed = ((L - n_global) * per_layer + sites * per_site) * local
+        if n_global == 0:
+            return config.max_seq_len if fixed <= KV_BUDGET_BYTES else \
+                max(KV_WINDOW_MIN, local)
+        ctx = ((KV_BUDGET_BYTES - fixed) // (n_global * per_layer)
+               // KV_GROUP * KV_GROUP)
+        return max(KV_WINDOW_MIN, min(ctx, config.max_seq_len))
+    per_pos = L * per_layer + sites * per_site
     window = (KV_BUDGET_BYTES // per_pos) // KV_GROUP * KV_GROUP
     return max(KV_WINDOW_MIN, min(window, config.max_seq_len))
 
@@ -621,9 +1222,11 @@ def make_causal_packing_mask(seg_ids, prefix=None, window=0):
     causal = jnp.tril(jnp.ones((T, T), dtype=jnp.bool_))
     block = (seg_ids[:, :, None] == seg_ids[:, None, :]) & (seg_ids[:, :, None] > 0)
     mask = block & causal[None, :, :]
-    if window:
+    static_zero = isinstance(window, (int, np.integer)) and int(window) == 0
+    if window is not None and not static_zero:
         pos = jnp.arange(T)
-        recent = (pos[:, None] - pos[None, :]) < window
+        limit = jnp.where(jnp.asarray(window) > 0, window, T + 1)
+        recent = (pos[:, None] - pos[None, :]) < limit
         sink = (jnp.zeros_like(seg_ids, dtype=jnp.bool_) if prefix is None
                 else prefix > 0)
         mask = mask & (recent[None, :, :] | sink[:, None, :])

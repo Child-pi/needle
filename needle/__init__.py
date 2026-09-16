@@ -147,6 +147,9 @@ def _lib(generation=2):
         lib.needle_reset.restype = None
         lib.needle_load.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
         lib.needle_load.restype = ctypes.c_int
+        if hasattr(lib, "needle_set_max_calls"):
+            lib.needle_set_max_calls.argtypes = [ctypes.c_int]
+            lib.needle_set_max_calls.restype = None
         _lib_handles[generation] = lib
     return _lib_handles[generation]
 
@@ -225,6 +228,13 @@ class Needle:
         _track("complete", self._track_props())
         payload = _prepare_audio(audio, audio_format, sample_rate, channels)
         return self._complete(text, max_new_tokens, payload)
+
+    def _set_max_calls(self, max_calls: int) -> None:
+        if self._worker is not None:
+            return
+        lib = _lib(self._generation)
+        if hasattr(lib, "needle_set_max_calls"):
+            lib.needle_set_max_calls(int(max_calls))
 
     def _complete(self, text: str, max_new_tokens: int = 256,
                   audio=None, ground: bool = True) -> dict:
@@ -548,7 +558,11 @@ def extract(text: str, schema: type | dict, system: str | None = None,
                        "generation": generation})
     agent = Needle(tools=[schema], system=system, weights=selected)
     try:
-        response = agent._complete(text, max_new_tokens)
+        agent._set_max_calls(1)
+        try:
+            response = agent._complete(text, max_new_tokens)
+        finally:
+            agent._set_max_calls(0)
     finally:
         agent.close()
     calls = response.get("function_calls") or []

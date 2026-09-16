@@ -49,9 +49,10 @@ def tiny_checkpoint(tmp_path_factory):
     from needle.model.architecture import SimpleAttentionNetwork, TransformerConfig
 
     config = TransformerConfig(
-        vocab_size=8192, d_model=64, num_heads=4, num_kv_heads=2, num_layers=2,
-        max_seq_len=128, engram_layers=(1,), engram_slots=64, mhc_lanes=2,
-        flash=False,
+        vocab_size=8192, out_vocab=8192, d_model=64, num_heads=4, num_kv_heads=2,
+        num_layers=4, qk_head_dim=16, v_head_dim=16, max_seq_len=128,
+        engram_layers=(1, 3), engram_slots=64, global_layers=(3,), sliding_window=32,
+        mhc_lanes=2, qkv_conv_taps=3, flash=False,
     )
     model = SimpleAttentionNetwork(config)
     params = model.init(jax.random.PRNGKey(0), jnp.ones((1, 8), jnp.int32))["params"]

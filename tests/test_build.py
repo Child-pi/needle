@@ -26,6 +26,33 @@ def test_build_exports_loadable_cact(tiny_checkpoint, tmp_path):
     assert any(isinstance(t, (bytes, bytearray)) for t in tensors)
 
 
+def test_build_layers_exports_the_rung(tiny_checkpoint, tmp_path):
+    from needle.model.finetune import build_main
+    from needle.model.export import read_export
+
+    out = str(tmp_path / "tiny_3l.cact")
+    args = _build_args(tiny_checkpoint, out, bits="4")
+    args.layers = 3
+    build_main(args)
+    header, _ = read_export(out)
+    assert header["num_layers"] == 3
+
+
+def test_load_checkpoint_drops_the_mtp_block(tiny_checkpoint, tmp_path):
+    import pickle
+    import numpy as np
+    from needle.model.run import load_checkpoint
+
+    with open(tiny_checkpoint, "rb") as handle:
+        checkpoint = pickle.load(handle)
+    checkpoint["params"]["mtp_combine"] = {"kernel": np.ones((4, 4), np.float32)}
+    path = tmp_path / "with_mtp.pkl"
+    with open(path, "wb") as handle:
+        pickle.dump(checkpoint, handle)
+    params, _ = load_checkpoint(str(path))
+    assert "mtp_combine" not in params
+
+
 def test_build_at_two_bits(tiny_checkpoint, tmp_path):
     from needle.model.finetune import build_main
     from needle.model.export import read_export

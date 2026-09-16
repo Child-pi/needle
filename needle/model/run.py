@@ -90,12 +90,11 @@ def load_checkpoint(path, return_run=False):
             f"(got format_version={version!r}). Old encoder-decoder/tool-calling "
             f"checkpoints are incompatible with this branch."
         )
-    config = ckpt["config"]
-    if isinstance(config, dict):
-        config = TransformerConfig(**config)
+    config = TransformerConfig.from_saved(ckpt["config"])
+    params = {k: v for k, v in ckpt["params"].items() if not k.startswith("mtp_")}
     if return_run:
-        return ckpt["params"], config, ckpt.get("run") or {}
-    return ckpt["params"], config
+        return params, config, ckpt.get("run") or {}
+    return params, config
 
 
 def _get_decode_fn(model, buf_len):

@@ -2,8 +2,8 @@
 weights the C++ / single-mega-kernel inference reads (mmap or linked read-only
 section; no parsing).
 
-Format is W4A8: the matmul weights (tied embedding + every attention projection)
-are Cactus-Quants INT4; norms, Hadamard diagonals, and gates stay FP16. Weights
+Format is CQ-WxA8: matmul weights use the per-tensor CQ width selected by the
+deployment map; norms, Hadamard diagonals, and gates stay FP16. Weights
 are PRE-TRANSPOSED to [out, in] so each output row is contiguous along the
 reduction axis (what a GEMV/GEMM stream wants, and the axis quant groups run
 along). Tensors are LAYER-MAJOR: embedding, then all of layer 0's tensors, ...,
@@ -16,14 +16,21 @@ The runtime reads the geometry from the header, so one binary loads and runs
 any configuration of the (single) architecture; tensors are positional in the
 fixed canon order below.
 
-HEADER  (30 u32-sized fields, rope_theta an f32, everything else u32):
+HEADER  (49 u32-sized fields, rope_theta an f32, everything else u32):
   tag, num_tensors, codebook_len, kv_window, kv_bits,
-  vocab, d_model, num_heads, num_kv_heads, num_layers, head_dim, max_seq_len,
-  hada_n, mhc_lanes, engram_slots, engram_sub_dim, num_engram_tables,
-  engram_conv_taps, engram_conv_dilation, num_engram_orders, engram_orders[4],
-  num_engram_sites, engram_sites[4], rope_theta;
+  vocab, out_vocab, d_model, num_heads, num_kv_heads, num_layers,
+  qk_head_dim, v_head_dim, max_seq_len, hada_n, mhc_lanes,
+  sliding_window, global_mask_lo, global_mask_hi, qkv_conv_taps,
+  engram_slots, engram_sub_dim, num_engram_tables, engram_conv_taps,
+  engram_conv_dilation, engram_seed_heads, num_engram_orders,
+  engram_orders[4], num_engram_sites, engram_sites[16], rope_theta.
+  out_vocab is the tied text-slice head (0 = full vocab); rows past out_vocab
+  are input-only code embeddings. sliding_window is the per-layer local width;
+  global_mask bits (layer i = bit i, lo then hi u32) mark full-attention
+  layers. qkv_conv_taps is the causal depthwise conv width on Q,K,V (0 = none);
 then codebook_len * f32 - the shared Lloyd-Max unit-sphere codebooks,
 cb2[4] | cb3[8] | cb4[16] concatenated, so mixed-precision blobs need one
+header. Binary CQ1 uses its analytic {-c, +c} codebook and does not enlarge the
 header. kv_window is the sliding-window width the model was trained with (0 =
 size it from the KV budget alone); kv_bits is the KV-cache width it was
 post-trained for (8 = int8, else 2/3/4). Both ride in the blob because a model
@@ -33,20 +40,36 @@ serves the wrong numerics.
 DIRECTORY  (num_tensors records, {REC_SIZE} bytes each, no names):
   u8 dtype, u8 ndim, u16 _pad, u32 shape[4], u64 offset, u64 nbytes,
   u32 group_size, u32 bits.  dtype: 1=FP16, 2=FP32, 3=CQ (bits gives the
-  width: 2, 3 or 4), 4=RAW.
+  width: 1, 2, 3 or 4; 5 denotes ternary crumbs), 4=RAW.
 
 TENSOR ORDER (what the runtime indexes by position):
-  embedding; per layer [norm_in, q_proj, k_proj, v_proj, q_norm, k_norm,
-  gate_proj, out_proj, post_norm, attn_gate, pre_hada, d1, d2, d3]; the 9 mHC
-  blocks; per engram site [tables, key_proj, value_proj, taps]; final_norm;
-  the optional probe heads (see below); then the RAW tokenizer.
+  embedding; per layer [norm_in, q_proj, k_proj, v_proj,
+  (q_taps, k_taps, v_taps when qkv_conv_taps > 0), q_norm, k_norm,
+  gate_proj, out_proj, post_norm, attn_gate, pre_hada, d1, d2, b2, d3, d4,
+  w1a, w1b, w2a, w2b, w3a, w3b, cond_v, cond_u]; the 9 mHC blocks; per engram
+  site [tables, key_proj, value_proj, taps]; final_norm; optional composite
+  image tensors [manifest, semantic table, texture table, projection,
+  input_norm]; the optional probe heads (see below); then the RAW tokenizer.
 
-PROBE HEADS (all FP16, appended so pre-head blobs stay loadable). Let
+The image manifest is FP32 with fields [magic, code_offset, positions,
+semantic_codes, semantic_dim, texture_books, texture_codes, texture_stages,
+texture_dim]. The vision encoder transports semantic IDs first, followed by
+positions * texture_books * texture_stages texture IDs. The runtime consumes
+that buffer as `positions` LM inputs rather than flattening every code into a
+separate token.
+
+PROBE HEADS (appended so pre-head blobs stay loadable). Let
   extra = num_tensors - (through final_norm) - (tokenizer). extra == 0 means no
   heads. Otherwise the tensor right after final_norm is a `heads.manifest` of
-  shape (H,), one code per head in canonical order (1 contrastive,
-  2 confidence), followed by H fixed-stride triples [probes (P, d_model),
-  proj (out, P*d_model), bias (out,)], so H = (extra - 1) / 3.
+  shape (H,), one code per head in canonical order (1 embedding,
+  2 confidence, 3 router), then each head's tensors with its own k and q:
+  [probes CQ ((L+1)*k, d_model), gain FP16 (L+1, k), query CQ (q, d_model),
+  row_bias FP16 (q, L+1, k), proj CQ (out, q*d_model), bias FP16 (out,)],
+  rows = embedding then blocks 0..L-1; the router appends calibration FP16 (3,).
+  The three matrices are CQ at HEAD_BITS with the model group size (the head
+  trained on them under QAT); the runtime also accepts the earlier all-FP16
+  layout with probes shaped (L+1, k, d_model). The walk consumes exactly
+  extra - 1 tensors.
 
 CQ blob for a logical [out, in] matrix (in padded up to a multiple of group):
 first the packed indices (out * in_pad*bits/8 bytes), then the per-group L2
@@ -65,7 +88,12 @@ field directly produces -1, 0, +1 in the NEON kernel. The codebook is not
 in the header: the 3-level Lloyd-Max centroids {-c, 0, +c} / sqrt(group),
 c = 1.2240064, are analytic.
 
-RAW "tokenizer" blob (self-contained SentencePiece BPE dump; see RefTokenizer
+BINARY (record bits=1, 2 levels) stores eight indices per byte. Its codebook is
+also analytic: {-sqrt(2/pi), +sqrt(2/pi)} / sqrt(group).
+
+RAW attachments follow the model tensors and heads. The first is the
+self-contained SentencePiece BPE dump; the optional second is the speech
+encoder's uncompressed NPZ archive. The SentencePiece dump format (see RefTokenizer
 below for the reference encoder/decoder this specifies):
   header  u32 n_pieces, u32 pad/eos/bos/unk id, u8 add_dummy_prefix,
           u8 byte_fallback, u16 _pad;
@@ -81,21 +109,21 @@ import numpy as np
 
 from .quantize import (_bits_for, _cq_codebook_np, _cq_hadamard_np,
                        parse_bits_map, TERNARY_BITS)
-from .architecture import TransformerConfig
 
-HEAD_STAGES = ("conf-head", "tool-head")
-
-TAG = 0x05E12A83
+TAG = 0x05E12A84
 ALIGN = 64
 FP16, FP32, CQ, RAW = 1, 2, 3, 4
 CB_BITS = (2, 3, 4)
+PACK_BITS = (1, *CB_BITS)
 TERNARY_RECORD_BITS = 5
+IMAGE_MANIFEST_MAGIC = 7391.0
+IMAGE_TENSOR_COUNT = 5
 
 TK_NORMAL, TK_UNKNOWN, TK_CONTROL, TK_USER_DEFINED, TK_BYTE = 0, 1, 2, 3, 4
 _TK_HDR = "<IIIIIBBH"
 _TK_REC = "<fBH"
 
-_HDR_FMT = "<29If"
+_HDR_FMT = "<48If"
 _REC_FMT = "<BBHIIIIQQII"
 REC_SIZE = struct.calcsize(_REC_FMT)
 
@@ -103,25 +131,17 @@ REC_SIZE = struct.calcsize(_REC_FMT)
 def _geometry(config):
     from .architecture import head_dims
     qk_hd, v_hd = head_dims(config)
-    if qk_hd != v_hd:
+    if config.num_layers > 64:
         raise NotImplementedError(
-            f"cact format stores a single head_dim; split attention dims "
-            f"(qk {qk_hd} / v {v_hd}) need a format bump and the matching "
-            f"engine port before export")
-    if getattr(config, "lexicon_layers", ()):
+            "cact global_mask holds 64 layers; deeper stacks need another bump")
+    if len(getattr(config, "engram_layers", ())) > 16:
         raise NotImplementedError(
-            "cact format has no lexicon section; lexicon runs are "
-            "research-only until the format and engine support it")
-    if getattr(config, "sliding_window", 0):
-        raise NotImplementedError(
-            "cact header carries a single kv_window; the local/global layer "
-            "pattern needs the format bump and engine port before export")
-    head_dim = qk_hd
+            "cact header holds 16 engram sites; denser engram needs another bump")
     orders = tuple(getattr(config, "engram_orders", (2, 3)))
     heads = getattr(config, "engram_heads", 0) or max(1, config.d_model // (len(orders) * ENGRAM_SUB_DIM))
     sub_dim = config.d_model // (len(orders) * heads)
     sites = tuple(getattr(config, "engram_layers", (2, 15)))
-    return head_dim, orders, heads, sub_dim, sites
+    return qk_hd, v_hd, orders, heads, sub_dim, sites
 
 
 ENGRAM_SUB_DIM = 128
@@ -182,8 +202,9 @@ def _unpack_ternary_crumbs(packed, in_pad):
 
 
 def _cq_pack(w, bits, group):
-    if bits not in CB_BITS and bits != TERNARY_BITS:
-        raise ValueError(f"CQ packing supports bits in {CB_BITS} or {TERNARY_BITS}; got bits={bits}")
+    if bits not in PACK_BITS and bits != TERNARY_BITS:
+        raise ValueError(
+            f"CQ packing supports bits in {PACK_BITS} or {TERNARY_BITS}; got bits={bits}")
     cb = _cq_codebook_np(bits, group)
     H = _cq_hadamard_np(group)
     out, D = w.shape
@@ -237,11 +258,15 @@ def _q(name, mat, bits, group):
     return _Tensor(name, CQ, mat.shape, packed.tobytes() + norms.tobytes(), group, rec_bits)
 
 
-def _tensors(params, config, bits, group):
-    _, orders, heads, sub_dim, sites = _geometry(config)
+def _tensors(params, config, bits, group, vocab_rows=None):
+    _, _, orders, heads, sub_dim, sites = _geometry(config)
     num_tables = len(orders) * heads
-    ts = [_q("embedding", np.asarray(_get(params, ("embedding", "embedding"))), bits, group)]
+    embedding = np.asarray(_get(params, ("embedding", "embedding")))
+    if vocab_rows:
+        embedding = np.concatenate([embedding[start:end] for start, end in vocab_rows])
+    ts = [_q("embedding", embedding, bits, group)]
 
+    taps_n = int(getattr(config, "qkv_conv_taps", 0))
     b = params["stack"]["layers"]["block"]
     sa, ha = b["self_attn"], b["hadamard_mlp"]
     for i in range(config.num_layers):
@@ -250,6 +275,14 @@ def _tensors(params, config, bits, group):
             _q(f"layer{i:02d}.q_proj", np.asarray(sa["q_proj"]["kernel"][i]).T, bits, group),
             _q(f"layer{i:02d}.k_proj", np.asarray(sa["k_proj"]["kernel"][i]).T, bits, group),
             _q(f"layer{i:02d}.v_proj", np.asarray(sa["v_proj"]["kernel"][i]).T, bits, group),
+        ]
+        if taps_n:
+            ts += [
+                _fp16(f"layer{i:02d}.q_taps", sa["q_taps"][i]),
+                _fp16(f"layer{i:02d}.k_taps", sa["k_taps"][i]),
+                _fp16(f"layer{i:02d}.v_taps", sa["v_taps"][i]),
+            ]
+        ts += [
             _fp16(f"layer{i:02d}.q_norm", sa["q_norm"]["scale"][i]),
             _fp16(f"layer{i:02d}.k_norm", sa["k_norm"]["scale"][i]),
             _q(f"layer{i:02d}.gate_proj", np.asarray(sa["gate_proj"]["kernel"][i]).T, bits, group),
@@ -259,7 +292,17 @@ def _tensors(params, config, bits, group):
             _fp16(f"layer{i:02d}.pre_hada", b["pre_hada_norm"]["scale"][i]),
             _fp16(f"layer{i:02d}.d1", ha["d1"][i]),
             _fp16(f"layer{i:02d}.d2", ha["d2"][i]),
+            _fp16(f"layer{i:02d}.b2", ha["b2"][i]),
             _fp16(f"layer{i:02d}.d3", ha["d3"][i]),
+            _fp16(f"layer{i:02d}.d4", ha["d4"][i]),
+            _fp16(f"layer{i:02d}.w1a", ha["w1a"][i]),
+            _fp16(f"layer{i:02d}.w1b", ha["w1b"][i]),
+            _fp16(f"layer{i:02d}.w2a", ha["w2a"][i]),
+            _fp16(f"layer{i:02d}.w2b", ha["w2b"][i]),
+            _fp16(f"layer{i:02d}.w3a", ha["w3a"][i]),
+            _fp16(f"layer{i:02d}.w3b", ha["w3b"][i]),
+            _fp16(f"layer{i:02d}.cond_v", ha["cond_v"][i]),
+            _fp16(f"layer{i:02d}.cond_u", ha["cond_u"][i]),
         ]
 
     mhc = params["stack"]
@@ -270,6 +313,15 @@ def _tensors(params, config, bits, group):
         phi = np.asarray(mhc[name])
         L, nC, lanes = phi.shape
         ts.append(_q(name, phi.transpose(0, 2, 1).reshape(L * lanes, nC), bits, group))
+
+    from .architecture import _hada_perms
+    hada_n = 1 << (config.d_model - 1).bit_length()
+    split = bool(getattr(config, "ladder_widths", ()))
+    p1, p2 = _hada_perms(hada_n, split)
+    ts.append(_Tensor("hada_p1", FP32, (hada_n,),
+                      np.asarray(p1, np.float32).tobytes()))
+    ts.append(_Tensor("hada_p2", FP32, (hada_n,),
+                      np.asarray(p2, np.float32).tobytes()))
 
     for s in range(len(sites)):
         eg = params[f"engrams_{s}"]
@@ -282,28 +334,74 @@ def _tensors(params, config, bits, group):
         ]
 
     ts.append(_fp16("final_norm", params["stack"]["final_norm"]["scale"]))
-    ts += _head_tensors(params)
+    ts += _image_tensors(params, config, bits, group)
+    ts += _head_tensors(params, group)
     return ts
 
 
-HEAD_CODES = (("contrastive_head", 1), ("confidence_head", 2))
+def _image_tensors(params, config, bits, group):
+    sem_codes = int(getattr(config, "image_sem_codes", 0) or 0)
+    if not sem_codes:
+        return []
+    code_offset = int(getattr(config, "image_code_offset", 0) or 0)
+    positions = int(getattr(config, "image_positions", 256) or 256)
+    sem_dim = int(getattr(config, "image_sem_dim", 0) or 0)
+    tex_books = int(getattr(config, "image_tex_books", 0) or 0)
+    tex_codes = int(getattr(config, "image_tex_codes", 0) or 0)
+    tex_stages = int(getattr(config, "image_tex_stages", 0) or 0)
+    tex_dim = int(getattr(config, "image_tex_dim", 0) or 0)
+    if (code_offset < 0 or positions <= 0 or sem_dim <= 0 or tex_books <= 0
+            or tex_codes <= 0 or tex_stages <= 0 or tex_dim <= 0
+            or code_offset + sem_codes > int(config.vocab_size)):
+        raise ValueError("invalid composite-image export geometry")
+
+    semantic = np.asarray(
+        params["image_sem_embedding"]["embedding"], np.float32)
+    texture = np.asarray(
+        params["image_texture_embedding"]["embedding"], np.float32)
+    projection = np.asarray(params["image_projection"]["kernel"], np.float32)
+    input_norm = np.asarray(params["image_input_norm"]["scale"], np.float32)
+    composite = sem_dim + tex_books * tex_dim
+    expected_texture = tex_books * tex_codes * tex_stages
+    if semantic.shape != (sem_codes, sem_dim):
+        raise ValueError("semantic image table disagrees with model config")
+    if texture.shape != (expected_texture, tex_dim):
+        raise ValueError("texture image table disagrees with model config")
+    if projection.shape != (composite, int(config.d_model)):
+        raise ValueError("image projection disagrees with composite geometry")
+    if input_norm.shape != (int(config.d_model),):
+        raise ValueError("image input norm disagrees with model dimension")
+
+    manifest = np.asarray([
+        IMAGE_MANIFEST_MAGIC, code_offset, positions, sem_codes, sem_dim,
+        tex_books, tex_codes, tex_stages, tex_dim,
+    ], np.float32)
+    return [
+        _Tensor("image.manifest", FP32, manifest.shape, manifest.tobytes()),
+        _fp16("image.semantic", semantic),
+        _fp16("image.texture", texture),
+        _q("image_projection", projection.T, bits, group),
+        _fp16("image.input_norm", input_norm),
+    ]
 
 
-def _head_tensors(params):
-    present = [(k, c) for k, c in HEAD_CODES if k in params]
+HEAD_MATRICES = ("probes", "query", "proj")
+
+
+def _head_tensors(params, group):
+    from .architecture import HEADS
+    from .quantize import HEAD_BITS
+    present = [head for head in HEADS if head.key in params]
     if not present:
         return []
-    ts = [_fp16("heads.manifest", np.asarray([c for _, c in present], np.float16))]
-    for key, _ in present:
-        h = params[key]
-        kernel = np.asarray(h["proj"]["kernel"]).T
-        bias = (np.asarray(h["proj"]["bias"]) if "bias" in h["proj"]
-                else np.zeros(kernel.shape[0], np.float16))
-        ts += [
-            _fp16(f"{key}.probes", np.asarray(h["probes"])),
-            _fp16(f"{key}.proj", kernel),
-            _fp16(f"{key}.bias", bias),
-        ]
+    ts = [_fp16("heads.manifest", np.asarray([head.code for head in present], np.float16))]
+    for head in present:
+        for name, value in head.export(params[head.key]):
+            if name.rsplit(".", 1)[-1] in HEAD_MATRICES:
+                matrix = np.asarray(value, np.float32).reshape(-1, value.shape[-1])
+                ts.append(_q(name, matrix, HEAD_BITS, group))
+            else:
+                ts.append(_fp16(name, value))
     return ts
 
 
@@ -319,7 +417,8 @@ def _tokenizer_blob(tok):
     sp = tok.sp
     n = sp.GetPieceSize()
     markers = set(CHAT_MARKERS)
-    out = bytearray(struct.pack(_TK_HDR, n, PAD_ID, EOS_ID, BOS_ID, UNK_ID, 1, 1, 0))
+    dummy = 1 if sp.IdToPiece(sp.Encode("a", out_type=int)[0]).startswith(_SP_META_SPACE) else 0
+    out = bytearray(struct.pack(_TK_HDR, n, PAD_ID, EOS_ID, BOS_ID, UNK_ID, dummy, 1, 0))
     for i in range(n):
         piece = sp.IdToPiece(i)
         if sp.IsControl(i):
@@ -337,25 +436,49 @@ def _tokenizer_blob(tok):
     return bytes(out)
 
 
-def _pack_cact(params, config, bits, group, tokenizer, kv_window=0):
+def vocab_rows_for(config):
+    text = int(getattr(config, "out_vocab", 0) or 0)
+    if not text or text >= int(config.vocab_size):
+        return None
+    return [(0, text)]
+
+
+def _pack_cact(params, config, bits, group, tokenizer, kv_window=0,
+               speech_tokenizer=None, vocab_rows=None):
     params = {k: v for k, v in params.items()}
-    ts = _tensors(params, config, bits, group)
+    ts = _tensors(params, config, bits, group, vocab_rows)
+    vocab = (sum(end - start for start, end in vocab_rows) if vocab_rows
+             else int(config.vocab_size))
+    out_vocab = int(getattr(config, "out_vocab", 0) or 0)
+    if out_vocab > vocab:
+        raise ValueError(f"out_vocab {out_vocab} exceeds the exported vocab {vocab}")
     if tokenizer is not None:
-        if tokenizer.vocab_size != config.vocab_size:
-            raise ValueError(f"tokenizer vocab {tokenizer.vocab_size} != config {config.vocab_size}")
+        if tokenizer.vocab_size > vocab:
+            raise ValueError(f"tokenizer vocab {tokenizer.vocab_size} > exported vocab {vocab}")
         ts.append(_Tensor("tokenizer", RAW, (), _tokenizer_blob(tokenizer)))
+    if speech_tokenizer is not None:
+        ts.append(_Tensor("speech_tokenizer", RAW, (), speech_tokenizer))
     cb = np.concatenate([_cq_codebook_np(b, group) for b in CB_BITS]).astype(np.float32)
     kv_bits = int(getattr(config, "kv_bits", 8) or 8)
-    head_dim, orders, heads, sub_dim, sites = _geometry(config)
+    qk_hd, v_hd, orders, heads, sub_dim, sites = _geometry(config)
     hada_n = 1 << (config.d_model - 1).bit_length()
     orders4 = (list(orders) + [0, 0, 0, 0])[:4]
-    sites4 = (list(sites) + [0, 0, 0, 0])[:4]
+    sites16 = (list(sites) + [0] * 16)[:16]
+    gmask = 0
+    for g in getattr(config, "global_layers", ()) or ():
+        gmask |= 1 << int(g)
     header = struct.pack(
         _HDR_FMT, TAG, len(ts), len(cb), int(kv_window or 0), kv_bits,
-        config.vocab_size, config.d_model, config.num_heads, config.num_kv_heads,
-        config.num_layers, head_dim, config.max_seq_len, hada_n,
-        config.mhc_lanes, config.engram_slots, sub_dim, len(orders) * heads,
-        ENGRAM_CONV_TAPS, max(orders), len(orders), *orders4, len(sites), *sites4,
+        vocab, out_vocab,
+        config.d_model, config.num_heads, config.num_kv_heads,
+        config.num_layers, qk_hd, v_hd, config.max_seq_len, hada_n,
+        config.mhc_lanes, int(getattr(config, "sliding_window", 0) or 0),
+        gmask & 0xFFFFFFFF, (gmask >> 32) & 0xFFFFFFFF,
+        int(getattr(config, "qkv_conv_taps", 0) or 0),
+        config.engram_slots, sub_dim, len(orders) * heads,
+        ENGRAM_CONV_TAPS, max(orders),
+        int(getattr(config, "engram_seed_heads", 0) or 0),
+        len(orders), *orders4, len(sites), *sites16,
         float(config.rope_theta)) + cb.tobytes()
 
     pos = len(header) + len(ts) * REC_SIZE
@@ -379,15 +502,18 @@ def _pack_cact(params, config, bits, group, tokenizer, kv_window=0):
 
 
 def build_export(params, config, bits=4, group=128, tokenizer=None, bits_map=None,
-                 kv_window=0):
+                 kv_window=0, speech_tokenizer=None, vocab_rows=None):
     b = parse_bits_map(bits_map) if bits_map else bits
-    return _pack_cact(params, config, b, group, tokenizer, kv_window)[0]
+    return _pack_cact(params, config, b, group, tokenizer, kv_window,
+                      speech_tokenizer, vocab_rows)[0]
 
 
 def write_export(params, config, path, bits=4, group=128, tokenizer=None,
-                 bits_map=None, kv_window=0):
+                 bits_map=None, kv_window=0, speech_tokenizer=None,
+                 vocab_rows=None):
     b = parse_bits_map(bits_map) if bits_map else bits
-    buf, n = _pack_cact(params, config, b, group, tokenizer, kv_window)
+    buf, n = _pack_cact(params, config, b, group, tokenizer, kv_window,
+                        speech_tokenizer, vocab_rows)
     with open(path, "wb") as f:
         f.write(buf)
     return {"path": path, "bytes": len(buf), "tensors": n}
@@ -400,15 +526,20 @@ def read_export(path):
     tag, num_tensors, cb_n, kv_window, kv_bits = hdr[:5]
     assert tag == TAG, "bad tag"
     geometry = dict(zip(
-        ("vocab_size", "d_model", "num_heads", "num_kv_heads", "num_layers",
-         "head_dim", "max_seq_len", "hada_n", "mhc_lanes", "engram_slots",
-         "engram_sub_dim", "num_engram_tables", "engram_conv_taps",
-         "engram_conv_dilation"), hdr[5:19]))
-    num_orders, orders4 = hdr[19], hdr[20:24]
-    num_sites, sites4 = hdr[24], hdr[25:29]
+        ("vocab_size", "out_vocab", "d_model", "num_heads", "num_kv_heads",
+         "num_layers", "qk_head_dim", "v_head_dim", "max_seq_len", "hada_n",
+         "mhc_lanes", "sliding_window", "global_mask_lo", "global_mask_hi",
+         "qkv_conv_taps", "engram_slots", "engram_sub_dim",
+         "num_engram_tables", "engram_conv_taps", "engram_conv_dilation",
+         "engram_seed_heads"), hdr[5:26]))
+    gmask = geometry.pop("global_mask_lo") | (geometry.pop("global_mask_hi") << 32)
+    geometry["global_layers"] = tuple(i for i in range(geometry["num_layers"])
+                                      if gmask >> i & 1)
+    num_orders, orders4 = hdr[26], hdr[27:31]
+    num_sites, sites16 = hdr[31], hdr[32:48]
     geometry["engram_orders"] = tuple(orders4[:num_orders])
-    geometry["engram_layers"] = tuple(sites4[:num_sites])
-    geometry["rope_theta"] = hdr[29]
+    geometry["engram_layers"] = tuple(sites16[:num_sites])
+    geometry["rope_theta"] = hdr[48]
     off = struct.calcsize(_HDR_FMT)
     codebook = np.frombuffer(raw[off:off + cb_n * 4], np.float32).copy()
     off += cb_n * 4
@@ -531,36 +662,3 @@ class RefTokenizer:
         if self.add_dummy and text.startswith(" "):
             text = text[1:]
         return text
-
-
-def main(args):
-    from .run import load_checkpoint
-    from .tokenizer import get_tokenizer
-    params, config, run_meta = load_checkpoint(args.checkpoint, return_run=True)
-    out = getattr(args, "out", None) or "needle.cact"
-    bits = getattr(args, "bits", None)
-    bits_map = getattr(args, "bits_map", None)
-    if bits is None and not bits_map:
-        bits_map = getattr(config, "weight_bits", "") or ""
-        if bits_map:
-            print(f"[export] scheme from the checkpoint: {bits_map}")
-        elif (run_meta or {}).get("stage") in ("qapt",) + HEAD_STAGES:
-            raise ValueError(
-                f"{os.path.basename(args.checkpoint)} is a "
-                f"'{run_meta['stage']}' checkpoint with no config.weight_bits. "
-                "Exporting it would silently ship plain W4 - numerics it was "
-                "never post-trained for. Migrate it "
-                "(scripts/migrate_checkpoint_numerics.py) or pass --bits-map.")
-        else:
-            bits = 4
-    elif bits is None:
-        bits = 4
-    from .architecture import effective_kv_window
-    kv_window = effective_kv_window(config)
-    info = write_export(params, config, out, bits=bits, bits_map=bits_map,
-                        tokenizer=get_tokenizer(config.vocab_size),
-                        kv_window=kv_window)
-    mb = info["bytes"] / 1e6
-    w = f"mixed[{bits_map}]" if bits_map else f"W{bits}"
-    print(f"wrote {info['path']}: {info['tensors']} tensors (+tokenizer), "
-          f"{mb:.2f} MB ({w}A8)")

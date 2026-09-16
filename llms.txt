@@ -167,7 +167,7 @@ pip install "cactus-needle[train]"                                              
 export OPENROUTER_API_KEY=sk-or-...
 needle generate-data --tools my_tools.json --num-samples 500 --output data.jsonl   # optional
 needle finetune data.jsonl --epochs 3 --generate 300                                # LoRA; auto-downloads base
-needle build checkpoints/needle2.pkl --lora checkpoints/needle_lora.safetensors --out my.cact
+needle build checkpoints/needle3.safetensors --lora checkpoints/needle_lora.safetensors --out my.cact
 ```
 
 Run a tuned model - the engine is weights-agnostic:
@@ -177,7 +177,7 @@ agent = needle.Needle(weights="my.cact", tools=[...])
 agent.run("...")
 ```
 
-Options: `finetune --lora-rank 16 --lora-alpha 32 --lr 1e-4 --batch-size 16 --max-len 1024 --val-split 0.1 --checkpoint <base.safetensors or .pkl> --checkpoint-dir <dir> --out <adapter.safetensors or .pkl> --generate <n> --model <id> --workers <n>`; `--model` defaults to `deepseek/deepseek-v4-flash`, `--workers` defaults to `8`, and `--checkpoint-dir` defaults to `checkpoints`. `--generate` synthesizes extra examples through the configured OpenRouter endpoint before training. `build --bits 2|4 --upload` (with `NEEDLE_HF_REPO=<you>/<model>`).
+Options: `finetune --layers <n> (fine-tune the n-layer rung of the depth ladder; build exports the same rung) --lora-rank 16 --lora-alpha 32 --lr 1e-4 --batch-size 16 --max-len 1024 --val-split 0.1 --checkpoint <base.safetensors or .pkl> --checkpoint-dir <dir> --out <adapter.safetensors or .pkl> --generate <n> --model <id> --workers <n>`; `--model` defaults to `deepseek/deepseek-v4-flash`, `--workers` defaults to `8`, and `--checkpoint-dir` defaults to `checkpoints`. `--generate` synthesizes extra examples through the configured OpenRouter endpoint before training. `build --bits 2|4 --upload` (with `NEEDLE_HF_REPO=<you>/<model>`).
 
 ## Playground (browser)
 
@@ -214,7 +214,7 @@ Adapt by swapping the Literal values for your own and keeping the shapes: closed
 - Do not create one `Needle` per turn for a conversation; reuse the instance so context carries. New tools = new instance.
 - `import needle` does not import JAX; only `needle finetune`/`build` do.
 - `weights=` expects a `.cact` (from `needle build`), not a `.safetensors` or `.pkl` checkpoint.
-- Checkpoints and adapters are `.safetensors`; only the Needle 2 base shipped as a `.pkl`, and both formats load.
+- Checkpoints and adapters are `.safetensors`; pickle checkpoints still load. The base is `checkpoints/needle3.safetensors` (16 layers); `needle3_enterprise.safetensors` is the 20-layer parent.
 - The engine cannot unload weights: once a tuned `.cact` is bound, constructing or calling a base-model agent raises instead of silently answering with those weights. Construct agents that want the base model before any tuned one, or run them in separate processes.
 
 ## Telemetry

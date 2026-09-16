@@ -28,7 +28,7 @@ def _training_rng(seed):
     return np.random.default_rng(int(seed))
 
 
-DEFAULT_BASE = "checkpoints/needle2.pkl"
+DEFAULT_BASE = "checkpoints/needle3.safetensors"
 
 OPENROUTER_URL = os.environ.get(
     "OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions"
@@ -258,6 +258,19 @@ def load_jsonl(path, tokenizer, max_len):
     return np.array(seqs, np.int32), np.array(masks, np.float32)
 
 
+def rung(params, config, layers):
+    from .architecture import ladder_config, ladder_slice
+
+    fields = dict(config.__dict__)
+    fields.update(ladder_depths=(), ladder_sample=False, ladder_widths=())
+    config = type(config)(**fields)
+    if not layers or layers == config.num_layers:
+        return params, config
+    if not 2 <= layers < config.num_layers:
+        raise ValueError(f"--layers must be in [2, {config.num_layers}], got {layers}")
+    return ladder_slice(params, config, layers), ladder_config(config, layers)
+
+
 def lora_target_paths(params):
     import jax.numpy as jnp
     from flax.traverse_util import flatten_dict
@@ -319,6 +332,8 @@ def finetune_local(args, progress=None):
                                   workers=getattr(args, "workers", 8))
 
     params, config = load_checkpoint(base_path)
+    layers = getattr(args, "layers", None)
+    params, config = rung(params, config, layers)
     config.dtype = "float32"
     params = jax.tree.map(lambda a: np.asarray(a).astype(np.float32), params)
     backend = jax.default_backend().lower()
@@ -328,6 +343,7 @@ def finetune_local(args, progress=None):
         config.scan_unroll = config.num_layers
     params = jax.device_put(params)
     emit(f"  {'backend':<9} {backend}  float32")
+    emit(f"  {'depth':<9} {config.num_layers} layers")
     tokenizer = get_tokenizer(config.vocab_size)
     max_len = fit_max_len(data_path, tokenizer, args.max_len)
     seqs, masks = load_jsonl(data_path, tokenizer, max_len)
@@ -437,6 +453,7 @@ def finetune_local(args, progress=None):
         "qat_bits": qat_bits,
         "qat_bits_map": qat_bits_map,
         "seed": seed,
+        "layers": int(config.num_layers),
     })
     print(f"  {'adapter':<9} {out}")
     print(f"  {'next':<9} needle build {base_path} --lora {out}")
@@ -447,14 +464,23 @@ def build_main(args):
     import jax.numpy as jnp
     from .run import load_checkpoint
     from .architecture import effective_kv_window
-    from .export import write_export
+    from .export import vocab_rows_for, write_export
 
     params, config, _ = load_checkpoint(args.checkpoint, return_run=True)
+    layers = getattr(args, "layers", None)
 
     adapter_qat_bits = None
     adapter_qat_bits_map = None
     if args.lora:
         adapter = read_adapter(args.lora)
+        adapter_layers = adapter.get("layers")
+        if adapter_layers and layers and int(layers) != int(adapter_layers):
+            raise ValueError(
+                f"adapter was trained on the {adapter_layers}-layer rung, but --layers "
+                f"{layers} would export a different depth")
+        layers = adapter_layers or layers
+    params, config = rung(params, config, layers)
+    if args.lora:
         lora = {tuple(key.split("/")): {"A": jnp.asarray(v["A"]), "B": jnp.asarray(v["B"])}
                 for key, v in adapter["lora"].items()}
         params = merge_lora(params, lora, adapter["scale"])
@@ -488,7 +514,8 @@ def build_main(args):
                         bits=int(bits) if bits else 4,
                         bits_map=bits_map,
                         tokenizer=get_tokenizer(config.vocab_size),
-                        kv_window=effective_kv_window(config))
+                        kv_window=effective_kv_window(config),
+                        vocab_rows=vocab_rows_for(config))
     scheme = f"mixed[{bits_map}]" if bits_map else f"W{bits}"
     print(f"  {'wrote':<9} {info['path']}  {info['bytes'] / 1e6:.2f} MB  {info['tensors']} tensors  {scheme}A8")
     print(f"  {'next':<9} needle.Needle(weights={out!r}, tools=[...])")
