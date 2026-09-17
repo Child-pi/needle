@@ -1,11 +1,5 @@
 ![Needle](assets/banner.svg)
 
-[![Try it in the browser](https://img.shields.io/badge/Try%20it%20in%20the%20browser-cactuscompute.com%2Fneedle-e8593d?style=flat-square)](https://cactuscompute.com/needle)
-[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Cactus--Compute%2Fneedle3-ffd21e?style=flat-square&logo=huggingface&logoColor=000)](https://huggingface.co/Cactus-Compute/needle3)
-[![GitHub](https://img.shields.io/badge/GitHub-cactus--compute%2Fneedle-181717?style=flat-square&logo=github)](https://github.com/cactus-compute/needle)
-
-# Needle
-
 A foundation model for mobiles, wearables, robots, smart home, automotive and microcontrollers. The whole model is a single 8-29 MB binary built on our Simple Attention Network, and we trade general chat capacity to beat models 10x its size on mobile tool calls and match 2-3x bigger models on extraction.
 
 - **Tool calls**: given the functions your app exposes, Needle picks the right ones and fills every argument from what the user said. Ask for two things and you get two calls in order; ask for something no tool covers and you get an empty list, not a guess.
@@ -29,6 +23,8 @@ The interactive frontier plot, the architecture and the fine-tuning results are 
 ```sh
 pip install cactus-needle
 ```
+
+Try it in the browser at [cactuscompute.com/needle](https://cactuscompute.com/needle); the weights and every platform engine are on [Hugging Face](https://huggingface.co/Cactus-Compute/needle3).
 
 Decorate a function: the signature gives the argument types, the docstring is the tool description, and `run()` completes the loop, executing your function and returning its results.
 
