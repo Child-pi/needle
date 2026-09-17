@@ -366,6 +366,14 @@ def _tokenizer_pieces(blob):
     return struct.unpack_from(_TK_HDR, blob, 0)[0]
 
 
+def read_layers(path):
+    with open(path, "rb") as f:
+        hdr = struct.unpack(_HDR_FMT, f.read(struct.calcsize(_HDR_FMT)))
+    if hdr[0] != TAG:
+        raise ValueError(f"{path} is not a Needle 3 .cact archive")
+    return hdr[10]
+
+
 def read_tokenizer_blob(path):
     """The packaged tokenizer of a .cact archive, read without unpacking its weights."""
     with open(path, "rb") as f:

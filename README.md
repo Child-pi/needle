@@ -1,44 +1,36 @@
-![Needle](assets/banner.png)
+![Needle](assets/banner.svg)
 
-# Needle 3
+[![Try it in the browser](https://img.shields.io/badge/Try%20it%20in%20the%20browser-cactuscompute.com%2Fneedle-e8593d?style=flat-square)](https://cactuscompute.com/needle)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Cactus--Compute%2Fneedle3-ffd21e?style=flat-square&logo=huggingface&logoColor=000)](https://huggingface.co/Cactus-Compute/needle3)
+[![GitHub](https://img.shields.io/badge/GitHub-cactus--compute%2Fneedle-181717?style=flat-square&logo=github)](https://github.com/cactus-compute/needle)
 
-Needle 3 is a 25-121M parameter foundation model for tool calling and structured extraction on tiny devices. It is a Laddered Simple Attention Network: any depth from 2 to 20 layers is a complete model, compressed to CQ2-bit with Cactus Quants into one 9-35 MB weights file that a sub-1 MB engine loads at start.
+# Needle
 
-This repository is the Python package: inference, LoRA fine-tuning, and export. `pip install cactus-needle`, describe your tools, and call them from Python. The engine and the weights are fetched once from Hugging Face and cached; there is nothing else to build.
+A foundation model for mobiles, wearables, robots, smart home, automotive and microcontrollers. The whole model is a single 8-29 MB binary built on our Simple Attention Network, and we trade general chat capacity to beat models 10x its size on mobile tool calls and match 2-3x bigger models on extraction.
 
-- **Self-contained**: a sub-1 MB engine per platform plus one `needle3.cact` weights file; inference does no network.
-- **Simple contract**: tool calls come back as structured data, text in, JSON out; a byte-level grammar compiled from your schemas constrains every token.
-- **Confidence-gated**: every response carries a calibrated confidence score from a learned head; set a threshold, act above it, escalate below it.
-- **Bounded memory**: a 256-token sliding window with the tools pinned as KV sinks, so memory stays flat no matter how long the conversation runs.
+- **Tool calls**: given the functions your app exposes, Needle picks the right ones and fills every argument from what the user said. Ask for two things and you get two calls in order; ask for something no tool covers and you get an empty list, not a guess.
+- **Structured extraction**: declare a shape, hand over messy text, get typed fields back: an invoice, a booking, a notification, a form. The decode grammar guarantees the output parses, and extraction generalises to classification.
+- **Text embedding**: the same model returns a vector for a sentence, so an app can search, match and route locally.
 
-Weights: [huggingface.co/Cactus-Compute/needle3](https://huggingface.co/Cactus-Compute/needle3) &middot; source: [github.com/cactus-compute/needle](https://github.com/cactus-compute/needle).
+![Needle 3 at a glance](assets/model.svg)
 
-![Size-quality frontier: mobile-class and below](assets/frontier.png)
+Needle 3 is a Laddered Simple Attention Network: a Monarch Hadamard MLP in place of the FFN, GQA attention with causal conv taps, engram n-gram memory read by gather, and multi-lane hyper-connections, trained so that every depth from 2 to 20 layers is a deployable model. Most of its parameters sit in the engram, so the 121M model does the arithmetic of a 50M one. A byte-level grammar compiled from your schemas constrains every token, and every response carries a calibrated confidence score from a learned head. The architecture diagram is on the [release page](https://cactuscompute.com/needle).
 
-## Laddered Simple Attention Network
+## Benchmarks
 
-Needle 3 is a Laddered Simple Attention Network, our small-model recipe: a Monarch Hadamard MLP in place of the FFN, GQA attention with causal conv taps, engram n-gram memory read by gather, and multi-lane hyper-connections, trained so that every depth from 2 to 20 layers is a deployable model. See the paper for the design and ablations: [arXiv:2607.18363](https://arxiv.org/abs/2607.18363).
+Tool calling is exact-match accuracy on the full test splits, extraction is field micro-F1 on the full test splits.
 
-![Simple Attention Network architecture](assets/architecture.png)
+![Needle 3 against baselines on six benchmarks](assets/benchmarks.svg)
 
-Each block carries its update rule. Here x̂ is the RMS-normalised flattening of the four residual streams, H the orthonormal Walsh-Hadamard transform (a fixed matrix, applied in n log n time with no weights to read), (kₜ, vₜ) rows gathered from hashed n-gram tables, and P the doubly-stochastic normalisation of the routing logits A, computed by Sinkhorn iteration; a, b, g and all σ-gates are learned and input-dependent. Both attention and MLP residuals are sandwich-normed and gated, the engram sites fire at two layers, and decoding is constrained by a byte-level grammar compiled from the declared schemas.
+The interactive frontier plot, the architecture and the fine-tuning results are at [cactuscompute.com/needle](https://cactuscompute.com/needle).
 
-## Quickstart
+## Get started
 
 ```sh
 pip install cactus-needle
 ```
 
-The runtime package does not install the training stack. Add the `train` extra
-when using fine-tuning or checkpoint export:
-
-```sh
-pip install "cactus-needle[train]"
-```
-
-Needle reads your tool descriptions to decide what to call and how to fill arguments, so describing them well is the whole game.
-
-**Simple**: decorate a function. The signature gives the argument types, the docstring is the tool description, and `run()` completes the loop: model picks the call, Needle executes your function, feeds the result back, and returns the final response with the executed tool results attached as `results`.
+Decorate a function: the signature gives the argument types, the docstring is the tool description, and `run()` completes the loop, executing your function and returning its results.
 
 ```python
 import needle
@@ -53,121 +45,55 @@ print(agent.run("what's it like in Lagos right now?")["results"])
 # [{'city': 'Lagos', 'temp_c': 27, 'sky': 'clear'}]
 ```
 
-**Extraction**: to pull structured data out of text, declare the shape and call `extract()`. Pass a Pydantic model and you get a typed object back.
+Every turn returns one JSON object with `function_calls`, the model's `reasoning` and a calibrated `confidence`; an off-topic request returns an empty list rather than a guess. `needle.Needle(tools=[...], generation=2)` keeps running Needle 2 for existing deployments.
 
-```python
-from pydantic import BaseModel
+## Guides
 
-class Invoice(BaseModel):
-    vendor: str
-    total: float
-    due_date: str
+- [How to design tools for Needle 3](https://cactuscompute.com/blog/designing-tools-for-needle): one tool per action, names users would say, formats in descriptions, constraints in the grammar, triggers.
+- [Leveraging Needle's confidence](https://cactuscompute.com/blog/needle-confidence): what the score measures, what the engine withholds, and routing on act, confirm or refuse.
+- [Structured JSON extraction with Needle](https://cactuscompute.com/blog/structured-extraction-with-needle): the record as the only tool, typed results, classification with enums.
+- [Fine-tuning Needle](https://cactuscompute.com/blog/finetuning-needle): the data format, the commands, reading the loss, sizing the dataset.
+- [Needle Python docs](https://cactuscompute.com/blog/needle-python-docs): the API, the response shape, the behaviour contract, system facts, tool retrieval, offline devices, environments, the CLI.
+- [What devices are supported on Needle](https://cactuscompute.com/blog/needle-supported-devices): every platform folder, the CLI runner, the C API, the browser, WASI, air-gapped setup.
+- [The .cact format](https://cactuscompute.com/blog/cact-format): the file the engine maps and reads in place, Cactus Quants at 2.125 bits per weight, and how to parse it yourself.
 
-invoice = needle.extract("Invoice from Acme Corp, $1,200.00, due 2026-09-01", Invoice)
-print(invoice.vendor, invoice.total)   # -> Acme Corp 1200.0
-```
+`llms.txt` in this repo carries the same reference for AI coding assistants.
 
-Per argument descriptions and choices, value constraints compiled into the decode grammar, raw JSON schemas, driving the loop with `complete()`, the response contract, system facts, tool retrieval, and confidence gating are all covered in [doc/apis.md](doc/apis.md).
+## Customisation
 
-## Playground
+Needle was designed to be customised. Its capacity is a ladder, and a subnetwork as small as 2 layers, fine-tuned on one product's tools, runs optimally on devices far smaller than the full model needs. Fine-tuning on DroidCall lifts every subnetwork by 18 to 36 points, and from 4 layers up the tuned subnetwork passes DeepSeek V4 Flash, starting at 29M parameters.
 
-Try any model in the browser: pick a preset, edit the tools or prompt, and Run. Follow-up queries continue the same conversation.
-
-```sh
-needle playground                      # base model, http://127.0.0.1:7860
-needle playground --weights my.cact    # a tuned model
-```
-
-The server downloads and initializes the model before serving, so the first query is instant. The **Finetune on these tools** button runs the fine-tuning pipeline below from the UI and hands back a downloadable `.cact`.
-
-## Environments
-
-Ready-made tool surfaces in `needle.environments`: `smart_home`, `media_player`, `productivity`, `wearable`, `kitchen_appliance`, and `data_capture`. Each is a hand-curated set of tools whose enums, bounds, and descriptions map cleanly onto Needle's constrained decoding, with a ready agent and a frozen acceptance suite.
-
-```python
-from needle.environments import smart_home
-
-smart_home.agent.complete("dim the study lights to 30 percent")
-smart_home.run_tests()
-```
-
-`python -m needle.environments.smart_home` runs a suite from the shell. To adapt an environment to your product, swap the `Literal` values (rooms, contacts, categories) for your own and keep the shapes: closed sets as enums, bounded numbers, verbatim copy for free text, five tools or fewer. The full tool surfaces and the suite contract are in [doc/environments.md](doc/environments.md).
-
-## Fine-tuning
-
-Needle fine-tunes with LoRA on the frozen base and merges the adapter at export, so a run is cheap and the tuned model is still a single `.cact` that runs on the same engine. The workflow is: (optionally) synthesize data, LoRA fine-tune, then build a tuned `.cact`. See [doc/finetuning.md](doc/finetuning.md) for dataset sizing, reading the loss curve, and troubleshooting.
-
-**Data format.** A JSONL file, one example per line. `reasoning` is optional; an off-topic example has `answers: []`.
-
-```json
-{"query": "dim the kitchen to 10", "tools": [{"name": "set_lights", "parameters": {"type": "object", "properties": {"room": {"type": "string"}, "brightness": {"type": "integer"}}, "required": ["room"]}}], "answers": [{"name": "set_lights", "arguments": {"room": "kitchen", "brightness": 10}}], "reasoning": "'kitchen' -> room; 'dim to 10' -> brightness 10"}
-```
-
-**1. Synthesize data (optional).** Needs `OPENROUTER_API_KEY`. Seed from a tool schema file, or expand an existing set:
+![Every subnetwork before and after fine-tuning on DroidCall and on Mobile Actions](assets/finetune.svg)
 
 ```sh
-export OPENROUTER_API_KEY=sk-or-...
-needle generate-data --tools my_tools.json --num-samples 500 --output data.jsonl
-needle generate-data --augment data.jsonl --num-samples 500      # expand an existing JSONL
+pip install "cactus-needle[train]"
+needle finetune data.jsonl --epochs 10 --out adapter.safetensors
+needle build --lora adapter.safetensors --layers 8 --out tuned.cact
 ```
 
-Set `OPENROUTER_URL` to use an OpenAI-compatible gateway instead of the default OpenRouter endpoint.
+Local fine-tuning trains and exports at 4 bits; the [fine-tuning guide](https://cactuscompute.com/blog/finetuning-needle) has the rest. The 2-bit post-training and quantisation behind the shipped model, enriched with Cactus proprietary datasets, run on the [Cactus Platform](https://cactuscompute.com/dashboard).
 
-**2. LoRA fine-tune.** The base checkpoint auto-downloads from Hugging Face if you do not pass `--checkpoint`. `--generate N` first synthesizes N more examples from the tools in your data (also needs `OPENROUTER_API_KEY`).
+## Deploy
+
+Every deployment target ships a prebuilt engine under 1 MB that loads the `needle3.cact` weights at start. `needle build --platform <folder> [--layers N]` fetches that engine and puts the weights beside it.
+
+![One engine per platform folder](assets/deploy.svg)
 
 ```sh
-needle finetune data.jsonl --epochs 10
-needle finetune data.jsonl --epochs 10 --generate 300 --lora-rank 16 --lora-alpha 32
+needle build --platform macos-arm64
+needle build --platform linux-arm64 --layers 8 --out ./pi
+./macos-arm64/needle --model needle3.cact --tools tools.json --serve
 ```
 
-Key options: `--epochs` (default 3), `--lora-rank` (16), `--lora-alpha` (32), `--lr` (1e-4), `--batch-size` (16), `--max-len` (1024), `--val-split` (0.1), `--checkpoint <base.safetensors or .pkl>`, `--checkpoint-dir <dir>` (default `checkpoints`), `--out <adapter.safetensors or .pkl>`, `--generate <n>`, `--model <id>` (default `deepseek/deepseek-v4-flash`), and `--workers <n>` (default 8). `--generate` uses the configured OpenRouter endpoint to synthesize extra examples before training. The adapter is written to `checkpoints/needle_lora.pkl` by default. A validation loss prints each epoch from the held out split.
-
-Training is plain JAX and runs on any accelerator jax supports. On an NVIDIA machine install the CUDA build and the same command trains on the GPU:
-
-```sh
-pip install "cactus-needle[train,gpu]"
-```
-
-On Apple Silicon the `metal` extra trains on the GPU:
-
-```sh
-pip install "cactus-needle[train,metal]"
-```
-
-Fine-tuning trains LoRA through 4-bit quantisation-aware numerics at the full 20 layers, so the adapter matches the archive `needle build` writes.
-
-**3. Build a tuned `.cact`.** Merge the adapter into the base and quantise to 4 bits. The checkpoint is optional: `needle build` uses the base the adapter was trained on, and auto-downloads the Needle 3 base if absent. Every build fetches the published `needle3.cact` and takes its tokenizer from it.
-
-```sh
-needle build --lora checkpoints/needle_lora.safetensors --out my_needle.cact
-needle build --lora checkpoints/needle_lora.safetensors --layers 8 --out my_needle_8l.cact   # 8-layer rung of the tuned base
-```
-
-The engine is weights-agnostic and never rebuilt: one engine library per platform (under 1MB) runs any archive. `needle download needle3` fetches the base 20-layer archive by itself, `needle download needle3.safetensors` the checkpoint to fine-tune. `needle build --layers n` exports any rung from 2 to 20 layers of the tuned base.
-
-Set `NEEDLE_HF_REPO=<you>/<model>` and pass `--upload` to publish the `.cact`. The counterpart `needle download <you>/<model>/my_needle.cact` pulls a published archive on any machine, and `needle download <platform>` (e.g. `macos-arm64`) fetches that platform's engine runner.
-
-**4. Run it.** The engine is weights-agnostic, so a tuned `.cact` runs on it directly - no recompilation:
-
-```python
-import needle
-agent = needle.Needle(weights="my_needle.cact", tools=[...])
-agent = needle.Needle(tools=[...])                 # the base Needle 3 archive, fetched once and cached
-agent = needle.Needle(tools=[...], generation=2)   # Needle 2, for existing deployments
-agent.run("...")
-```
-
-## Telemetry
-
-Cactus Compute collects strictly anonymous usage telemetry (function name, package version, OS — never your prompts, outputs, or data); opt out with `NEEDLE_TELEMETRY=0` or `DO_NOT_TRACK=1`.
+The [devices guide](https://cactuscompute.com/blog/needle-supported-devices) lists every folder and what ships in it.
 
 ## Citation
 
-Needle 3 is built by the Cactus Compute team. If you use it in your work, please cite:
+Needle is built by the Cactus Compute team. If you use it in your work, please cite:
 
 ```bibtex
 @misc{needle3_2026,
-  title        = {Needle 3: A Foundation Tool-Calling Model for Tiny Devices},
+  title        = {Needle: Automation Foundation Model for Tiny Devices},
   author       = {Ndubuaku, Henry and Mosoyan, Karen and Mroz, Jakub and Cylich, Noah and
                   Kumar, Satyajit and Sandhu, Parkirat and Shemet, Roman and Lee, Justin H.},
   year         = {2026},
@@ -175,5 +101,3 @@ Needle 3 is built by the Cactus Compute team. If you use it in your work, please
   howpublished = {\url{https://github.com/cactus-compute/needle}}
 }
 ```
-
-Reach out on founders@cactuscompute.com for partnerships, collaborations, synergies and deploying Needle2 in your product.

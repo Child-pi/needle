@@ -431,35 +431,56 @@ def finetune_local(args, progress=None):
 
 
 def build_main(args):
+    import shutil
     import jax.numpy as jnp
     from ..agent import fetch
     from .run import load_checkpoint
     from .architecture import effective_kv_window
-    from .export import read_tokenizer_blob, write_export
+    from .export import read_layers, read_tokenizer_blob, write_export
     from .quantize import WEIGHT_BITS
 
     base_archive = fetch.fetch_weights(3, force=True)
     print(f"  {'base':<9} {base_archive}  {os.path.getsize(base_archive) / 1e6:.2f} MB")
-    adapter = read_adapter(args.lora) if args.lora else None
-    checkpoint = args.checkpoint
-    if not checkpoint and adapter and adapter.get("base") and os.path.exists(adapter["base"]):
-        checkpoint = adapter["base"]
-    checkpoint = checkpoint or DEFAULT_BASE
-    params, config, _ = load_checkpoint(checkpoint, return_run=True)
-    if args.lora:
-        lora = {tuple(key.split("/")): {"A": jnp.asarray(v["A"]), "B": jnp.asarray(v["B"])}
-                for key, v in adapter["lora"].items()}
-        params = merge_lora(params, lora, adapter["scale"])
-        print(f"  {'merged':<9} {len(lora)} weight groups  {args.lora}")
-    params, config = rung(params, config, getattr(args, "layers", None))
-    print(f"  {'depth':<9} {config.num_layers} layers")
-
-    out = args.out or (os.path.splitext(os.path.basename(checkpoint))[0] + ".cact")
-    info = write_export(params, config, out, bits=WEIGHT_BITS,
-                        tokenizer=read_tokenizer_blob(base_archive),
-                        kv_window=effective_kv_window(config))
-    print(f"  {'wrote':<9} {info['path']}  {info['bytes'] / 1e6:.2f} MB  {info['tensors']} tensors  W{WEIGHT_BITS}A8")
-    print(f"  {'next':<9} needle.Needle(weights={out!r}, tools=[...])")
+    platform = getattr(args, "platform", None)
+    layers = getattr(args, "layers", None)
+    folder = None
+    if platform:
+        folder = os.path.abspath(args.out or platform)
+        for path in fetch.download_platform(platform, os.path.dirname(folder), generation=3, dest=folder):
+            print(f"  {'engine':<9} {path}  {os.path.getsize(path) / 1e6:.2f} MB")
+        out = os.path.join(folder, fetch.base_weights(3))
+    else:
+        out = args.out
+    if not args.lora and (not layers or layers == read_layers(base_archive)):
+        if not out:
+            raise SystemExit("pass --out <archive.cact>, or --platform to build a runnable folder")
+        shutil.copyfile(base_archive, out)
+        print(f"  {'wrote':<9} {out}  {os.path.getsize(out) / 1e6:.2f} MB  the published base archive")
+    else:
+        adapter = read_adapter(args.lora) if args.lora else None
+        checkpoint = args.checkpoint
+        if not checkpoint and adapter and adapter.get("base") and os.path.exists(adapter["base"]):
+            checkpoint = adapter["base"]
+        checkpoint = checkpoint or DEFAULT_BASE
+        params, config, _ = load_checkpoint(checkpoint, return_run=True)
+        if args.lora:
+            lora = {tuple(key.split("/")): {"A": jnp.asarray(v["A"]), "B": jnp.asarray(v["B"])}
+                    for key, v in adapter["lora"].items()}
+            params = merge_lora(params, lora, adapter["scale"])
+            print(f"  {'merged':<9} {len(lora)} weight groups  {args.lora}")
+        params, config = rung(params, config, layers)
+        print(f"  {'depth':<9} {config.num_layers} layers")
+        out = out or (os.path.splitext(os.path.basename(checkpoint))[0] + ".cact")
+        info = write_export(params, config, out, bits=WEIGHT_BITS,
+                            tokenizer=read_tokenizer_blob(base_archive),
+                            kv_window=effective_kv_window(config))
+        print(f"  {'wrote':<9} {info['path']}  {info['bytes'] / 1e6:.2f} MB  {info['tensors']} tensors  W{WEIGHT_BITS}A8")
+    if folder:
+        runner = next((n for n in ("needle", "needle.exe") if os.path.exists(os.path.join(folder, n))), None)
+        if runner:
+            print(f"  {'next':<9} {os.path.join(folder, runner)} --model {os.path.basename(out)} --tools tools.json --serve")
+    else:
+        print(f"  {'next':<9} needle.Needle(weights={out!r}, tools=[...])")
 
     if args.upload:
         repo = os.environ.get("NEEDLE_HF_REPO")

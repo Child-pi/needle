@@ -6,8 +6,9 @@ import pytest
 pytestmark = pytest.mark.slow
 
 
-def _build_args(checkpoint, out, lora=None):
-    return types.SimpleNamespace(checkpoint=checkpoint, lora=lora, out=out, upload=False)
+def _build_args(checkpoint, out, lora=None, layers=None, platform=None):
+    return types.SimpleNamespace(checkpoint=checkpoint, lora=lora, out=out, upload=False,
+                                 layers=layers, platform=platform)
 
 
 def test_build_exports_loadable_cact(tiny_checkpoint, tmp_path, published_base):
@@ -92,3 +93,25 @@ def test_build_layers_exports_the_rung(tiny_checkpoint, tmp_path, published_base
     build_main(args)
     header, _ = read_export(out)
     assert header["num_layers"] == 3
+
+
+def test_build_platform_places_the_engine_and_the_archive_together(tiny_checkpoint, tmp_path, published_base, monkeypatch):
+    from needle.agent import fetch
+    from needle.model.finetune import build_main
+    from needle.model.export import read_layers
+
+    def fake_platform(name, out_dir, generation=3, dest=None):
+        os.makedirs(dest, exist_ok=True)
+        runner = os.path.join(dest, "needle")
+        with open(runner, "wb") as handle:
+            handle.write(b"engine")
+        return [runner]
+
+    monkeypatch.setattr(fetch, "download_platform", fake_platform)
+    folder = str(tmp_path / "pi")
+    build_main(_build_args(None, folder, platform="linux-arm64"))
+    assert os.path.exists(os.path.join(folder, "needle"))
+    archive = os.path.join(folder, "needle3.cact")
+    assert read_layers(archive) == read_layers(fetch.fetch_weights(3))
+    build_main(_build_args(tiny_checkpoint, folder, platform="linux-arm64", layers=3))
+    assert read_layers(archive) == 3

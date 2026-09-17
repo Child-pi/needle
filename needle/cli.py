@@ -136,6 +136,8 @@ def main():
         print(HELP)
         sys.exit(0)
 
+    from .agent import fetch
+
     parser = argparse.ArgumentParser(prog="needle", add_help=False)
     sub = parser.add_subparsers(dest="command")
     p = sub.add_parser("run")
@@ -190,6 +192,9 @@ def main():
     p.add_argument("--upload", action="store_true", help="Push the .cact to $NEEDLE_HF_REPO")
     p.add_argument("--layers", type=int, default=None,
                    help="Export the N-layer rung of the base (2..20); default the full 20")
+    p.add_argument("--platform", type=str, default=None, choices=fetch.PLATFORMS,
+                   help="Also download that platform's engine and header, and place the "
+                        "archive beside them as needle3.cact (--out is then a directory)")
 
     p = sub.add_parser("download")
     p.add_argument("spec", type=str,
@@ -198,16 +203,16 @@ def main():
                         "folder (e.g. macos-arm64), or a Hugging Face spec: "
                         "<org>/<repo>/<file>.cact, or <org>/<repo> if it holds one archive")
     p.add_argument("--out", type=str, default=".", help="Directory to place the files")
-    p.add_argument("--generation", type=int, choices=[2, 3], default=2,
-                   help="Engine generation when downloading a platform build (default: 2)")
+    p.add_argument("--generation", type=int, choices=[2, 3], default=3,
+                   help="Engine generation when downloading a platform build (default: 3)")
 
     p = sub.add_parser("fetch")
     p.add_argument("--out", type=str, default=None,
                    help="Directory to place the engine (default: the cache)")
     p.add_argument("--platform-tag", type=str, default=None,
                    help="Fetch the build for another device, e.g. manylinux2014_aarch64")
-    p.add_argument("--generation", type=int, choices=[2, 3], default=2,
-                   help="Needle engine generation to fetch (default: 2)")
+    p.add_argument("--generation", type=int, choices=[2, 3], default=3,
+                   help="Needle engine generation to fetch (default: 3)")
 
     p = sub.add_parser("playground")
     p.add_argument("--weights", type=str, default=None,

@@ -93,7 +93,7 @@ def _register_download(generation=2):
         pass
 
 
-def download_platform(name, out_dir, generation=2):
+def download_platform(name, out_dir, generation=2, dest=None):
     import shutil
     import stat
     from huggingface_hub import hf_hub_download, list_repo_files
@@ -101,7 +101,9 @@ def download_platform(name, out_dir, generation=2):
     repo = engine_repo(generation)
     _register_download(generation)
     files = [f for f in list_repo_files(repo) if f.startswith(name + "/")]
-    dest = os.path.join(out_dir, name)
+    if name not in PLATFORMS or not files:
+        raise FileNotFoundError(f"{name} is not a published platform folder in {repo}")
+    dest = dest or os.path.join(out_dir, name)
     os.makedirs(dest, exist_ok=True)
     out = []
     for f in files:
