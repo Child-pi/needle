@@ -83,6 +83,8 @@ needle build --platform linux-arm64 --layers 8 --out ./pi
 
 The [devices guide](https://cactuscompute.com/blog/needle-supported-devices) lists every folder and what ships in it.
 
+By default, telemetry is turned on in the binary. To turn it off, set environment variables NEEDLE_TELEMETRY=0 and DO_NOT_TRACK=1. 
+
 ## Citation
 
 Needle is built by the Cactus Compute team. If you use it in your work, please cite:
