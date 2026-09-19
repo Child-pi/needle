@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Needle 3 核心技術與應用研究報告 | 專為極微型設備打造的自動化基底模型</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0a0a0c;
+      --bg-secondary: #121215;
+      --bg-card: #18181c;
+      --bg-card-hover: #202026;
+      --accent: #e8593d;
+      --accent-glow: rgba(232, 89, 61, 0.18);
+      --accent-subtle: #2d1814;
+      --text-primary: #f0eee6;
+      --text-secondary: #a3a099;
+      --text-muted: #6b6860;
+      --border: #26262c;
+      --border-accent: rgba(232, 89, 61, 0.4);
+      --code-bg: #0f0f13;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --info: #60a5fa;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: 'Inter', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Container & Layout */
+    .container {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Top Navigation Bar */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(10, 10, 12, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 64px;
+    }
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text-primary);
+    }
+    .logo-badge {
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      letter-spacing: 0.5px;
+    }
+    .logo-title {
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -0.5px;
+    }
+    .nav-links {
+      display: flex;
+      gap: 20px;
+      list-style: none;
+    }
+    .nav-links a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover {
+      color: var(--accent);
+    }
+
+    /* Hero Section */
+    .hero {
+      padding: 60px 0 40px;
+      text-align: center;
+      position: relative;
+    }
+    .hero-banner-img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 16px;
+      margin-bottom: 32px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      border: 1px solid var(--border);
+    }
+    .badge-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--accent-subtle);
+      border: 1px solid var(--border-accent);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 100px;
+      margin-bottom: 20px;
+      letter-spacing: 0.5px;
+    }
+    .hero h1 {
+      font-size: 42px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      line-height: 1.25;
+      margin-bottom: 18px;
+      background: linear-gradient(135deg, #ffffff 40%, #a8a69e 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero-desc {
+      font-size: 19px;
+      color: var(--text-secondary);
+      max-width: 840px;
+      margin: 0 auto 36px;
+      font-weight: 400;
+    }
+
+    /* Key Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 50px;
+    }
+    .metric-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      padding: 22px 20px;
+      border-radius: 12px;
+      text-align: left;
+      position: relative;
+      overflow: hidden;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .metric-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--border-accent);
+    }
+    .metric-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--accent);
+    }
+    .metric-val {
+      font-size: 32px;
+      font-weight: 800;
+      color: #fff;
+      font-family: 'Fira Code', monospace;
+      letter-spacing: -1px;
+      margin-bottom: 4px;
+    }
+    .metric-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+    .metric-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+
+    /* Section Styles */
+    section {
+      padding: 48px 0;
+      border-top: 1px solid var(--border);
+    }
+    .section-title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .section-title span.number {
+      font-family: 'Fira Code', monospace;
+      font-size: 16px;
+      color: var(--accent);
+      background: var(--accent-subtle);
+      padding: 2px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border-accent);
+    }
+    .section-desc {
+      font-size: 16px;
+      color: var(--text-secondary);
+      margin-bottom: 30px;
+      max-width: 900px;
+    }
+
+    /* Visual Media Display */
+    .media-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px;
+      margin: 24px 0;
+      text-align: center;
+    }
+    .media-card img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 8px;
+      display: block;
+      margin: 0 auto;
+    }
+    .media-caption {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 14px;
+      font-family: 'Fira Code', monospace;
+    }
+
+    /* Feature Grid */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+      margin: 24px 0;
+    }
+    .feature-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      transition: border-color 0.2s;
+    }
+    .feature-box:hover {
+      border-color: rgba(232, 89, 61, 0.35);
+    }
+    .feature-box h3 {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #fff;
+    }
+    .feature-box p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    /* Flowchart / Process Visual */
+    .process-flow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 12px;
+      margin: 24px 0;
+    }
+    .flow-step {
+      flex: 1;
+      min-width: 200px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      position: relative;
+    }
+    .flow-step-num {
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      color: var(--accent);
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .flow-step-title {
+      font-weight: 700;
+      font-size: 15px;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+    .flow-step-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+    }
+
+    /* Code Snippets & Tabs */
+    .code-container {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin: 24px 0;
+    }
+    .code-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 18px;
+      background: #141419;
+      border-bottom: 1px solid var(--border);
+      font-family: 'Fira Code', monospace;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .code-dots {
+      display: flex;
+      gap: 6px;
+    }
+    .code-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #33333d;
+    }
+    pre {
+      padding: 20px;
+      overflow-x: auto;
+      font-family: 'Fira Code', monospace;
+      font-size: 13.5px;
+      line-height: 1.6;
+      color: #e4e2da;
+    }
+    .keyword { color: #f472b6; }
+    .fn { color: #60a5fa; }
+    .str { color: #34d399; }
+    .comment { color: #6b6860; font-style: italic; }
+    .decorator { color: #fbbf24; }
+    .type { color: #38bdf8; }
+    .num { color: #a78bfa; }
+    .highlight { background: rgba(232, 89, 61, 0.15); border-left: 3px solid var(--accent); padding-left: 8px; }
+
+    /* Comparison Table */
+    .table-wrapper {
+      overflow-x: auto;
+      margin: 24px 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 14px;
+    }
+    th {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      padding: 14px 18px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .tag-needle {
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .tag-other {
+      background: #2a2a32;
+      color: #c9c6bd;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+
+    /* Comparison Callout */
+    .callout {
+      background: var(--bg-card);
+      border-left: 4px solid var(--accent);
+      border-radius: 0 10px 10px 0;
+      padding: 18px 22px;
+      margin: 20px 0;
+    }
+    .callout-title {
+      font-weight: 700;
+      color: #fff;
+      font-size: 15px;
+      margin-bottom: 6px;
+    }
+    .callout-content {
+      color: var(--text-secondary);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    /* Platform Grid */
+    .platform-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 16px 0;
+    }
+    .platform-pill {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'Fira Code', monospace;
+    }
+    .platform-pill span.os {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+    footer a {
+      color: var(--text-secondary);
+      text-decoration: none;
+    }
+    footer a:hover {
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navigation -->
+  <header>
+    <div class="container nav-inner">
+      <a href="#" class="logo-group">
+        <span class="logo-badge">NEEDLE 3</span>
+        <span class="logo-title">技術深度研究與分析報告</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#overview">專案定位</a></li>
+        <li><a href="#architecture">核心架構</a></li>
+        <li><a href="#example">實作範例</a></li>
+        <li><a href="#benchmarks">評測數據</a></li>
+        <li><a href="#deployment">邊緣部署</a></li>
+      </ul>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Hero Banner -->
+    <div class="hero">
+      <div class="badge-pill">
+        <span>⚡ 2-bit 量化 · 8~29 MB 體積 · 微型邊緣終端自動化大腦</span>
+      </div>
+      <h1>Needle 3：專為微型設備打造的<br>自動化基底模型 (Automation Foundation Model)</h1>
+      <p class="hero-desc">
+        將端側 AI 推向極致：告別龐大雲端 LLM 的高延遲、高頻寬與隱私風險。Needle 專注於<strong>工具調用 (Tool Calls)</strong>、<strong>結構化萃取 (Structured Extraction)</strong>與<strong>本地設備控制</strong>，在僅 8~29 MB 的體積下，達到超越 10 倍參數模型的執行準確度。
+      </p>
+
+      <img src="assets/banner.svg" alt="Needle Banner" class="hero-banner-img">
+    </div>
+
+    <!-- Core Metrics Cards -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-val">8 ~ 29 MB</div>
+        <div class="metric-label">超輕量單一二進制</div>
+        <div class="metric-sub">CQ2 (2.125-bit) 權重，手機手錶零負擔</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val">10k tok/s</div>
+        <div class="metric-label">樹莓派極致速度</div>
+        <div class="metric-sub">Pi 5 上 10,000 prefill / 4,000 decode</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val">100%</div>
+        <div class="metric-label">保證 JSON 語法有效</div>
+        <div class="metric-sub">字節級語法編譯，絕無格式崩壞</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val">&lt; 1 MB</div>
+        <div class="metric-label">原生執行引擎體積</div>
+        <div class="metric-sub">跨 13 種架構原生 C API，免本地編譯</div>
+      </div>
+    </div>
+
+    <!-- Section 1: Overview -->
+    <section id="overview">
+      <h2 class="section-title"><span class="number">01</span> 這個專案究竟能做什麼？ (Project Overview)</h2>
+      <p class="section-desc">
+        在傳統邊緣裝置（如智慧家居中控、穿戴裝置、機器人、車載中控）上運行 AI，面臨著「雲端 LLM 延遲高且需聯網」或「本地小模型胡言亂語 (幻覺)、無法精準輸出 JSON 格式」的兩難境地。<strong>Needle 重新定義了小型模型的設計哲學</strong>：它放棄了一般開放式聊天 (General Chat)，將全部參數量投注於「精確理解意圖並調用硬體 API」。
+      </p>
+
+      <div class="features-grid">
+        <div class="feature-box">
+          <h3>🎯 精確工具調用 (Precise Tool Calling)</h3>
+          <p>
+            給定應用程式暴露的 Python 函式或 JSON Schema，Needle 能精準選取對應工具，並從用戶自然語言中抽取出各項參數。一次請求需要兩個動作，便按順序返回兩個呼叫；請求超出支援範圍時，直接返回空陣列拒絕，絕不強行瞎猜。
+          </p>
+        </div>
+
+        <div class="feature-box">
+          <h3>📋 零出錯結構化萃取 (Structured Extraction)</h3>
+          <p>
+            定義目標資料結構（如 Pydantic 模型），將凌亂的自然語言、語音轉文字雜訊、發票、行程通知丟給 Needle，即可在毫秒級時間內提取出保證符合 Type 的欄位資料，兼具分類與提取能力。
+          </p>
+        </div>
+
+        <div class="feature-box">
+          <h3>🧭 本地語意向量與路由 (Text Embedding)</h3>
+          <p>
+            模型本身可為句子輸出 128 維語意向量（Vector Embeddings）。當系統註冊超過 5 個工具時，內建的 Retrieval Head 會自動以向量檢索出 Top-5 候選工具，實現大規模工具集的快速路由。
+          </p>
+        </div>
+
+        <div class="feature-box">
+          <h3>🛡️ 校準置信度與接地驗證 (Confidence & Grounding)</h3>
+          <p>
+            每一次回應皆附帶一個校準後的置信度分數（0.0 ~ 1.0），並具備 Grounding Gate（實體比對與日期修復），如果參數未在輸入上下文找到依據，系統會主動攔截並移入 <code>suppressed_calls</code>，供人機協同二次確認。
+          </p>
+        </div>
+      </div>
+
+      <!-- Needle 3 at a glance visual -->
+      <div class="media-card">
+        <img src="assets/model.svg" alt="Needle 3 at a Glance">
+        <div class="media-caption">▲ 圖 1：Needle 3 架構概覽 — 輸入、輸出、階梯式模型、專有預訓練資料與極致推理速度</div>
+      </div>
+    </section>
+
+    <!-- Section 2: Architecture & Technical Breakthroughs -->
+    <section id="architecture">
+      <h2 class="section-title"><span class="number">02</span> 技術突破與架構原理 (Under the Hood)</h2>
+      <p class="section-desc">
+        Needle 3 並非一般常見的 Llama 或 Qwen 剪枝模型，而是基於全新的 <strong>Laddered Simple Attention Network</strong> 階梯式架構設計：
+      </p>
+
+      <div class="process-flow">
+        <div class="flow-step">
+          <div class="flow-step-num">MODULE 01</div>
+          <div class="flow-step-title">Monarch Hadamard MLP</div>
+          <div class="flow-step-desc">全面取代昂貴的前饋網路 (FFN)，使用塊對角與結構化矩陣乘法，在維持特徵表達力的同時將參數量與算力消耗腰斬。</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-step-num">MODULE 02</div>
+          <div class="flow-step-title">Engram 記憶體聚集</div>
+          <div class="flow-step-desc">大部分參數量配置於 N-gram 記憶體槽（Gather 查表操作），使得 121M 的旗艦模型僅需消耗 50M 模型的算術乘加負載。</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-step-num">MODULE 03</div>
+          <div class="flow-step-title">Ladder 階梯式隨切架構</div>
+          <div class="flow-step-desc">從 2 層 (25M) 到 20 層 (121M) 的任一深度，都能直接切出獨立可部署的子網路（Subnetwork），完美適配不同算力的硬體。</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-step-num">MODULE 04</div>
+          <div class="flow-step-title">CQ2 2-Bit 極致量化</div>
+          <div class="flow-step-desc">獨創 Cactus Quants，平均每權重僅佔 2.125 bits，整顆模型打包為單一 <code>.cact</code> 檔案，引擎可直接在記憶體中 mmap 就地讀取。</div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <div class="callout-title">💡 為什麼 Needle 永遠不會輸出格式錯誤的 JSON？</div>
+        <div class="callout-content">
+          傳統 LLM 往往需要仰賴複雜的 Prompting（例如 "Please respond in strictly valid JSON"），或依賴後處理正則修復。Needle 採用了<strong>字節級編譯語法限制（Byte-level Grammar Decoding）</strong>：在自回歸生成每個 Token 時，解碼器直接以用戶定義的 Schema 狀態機對 Vocab Logits 進行遮罩，非法的字元機率直接被歸零。因此，產出的結果在<strong>數學與語法層面保證 100% 正確</strong>。
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Concrete Code Examples -->
+    <section id="example">
+      <h2 class="section-title"><span class="number">03</span> 具體實作範例 (Concrete Real-World Examples)</h2>
+      <p class="section-desc">
+        以下透過三個代表性場景，展示 Needle 在 Python 端側程式碼中的極簡使用方式。
+      </p>
+
+      <h3 style="font-size: 20px; margin-bottom: 12px; color: #fff;">範例 1：智慧家庭與掃地機器人聯動控制 (Agentic Tool Calling)</h3>
+      <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+        用戶以口語化指令同時控制「調光」與「掃地機器人」，Needle 自動生成多個有序工具調用，並完成完整執行閉環：
+      </p>
+
+      <div class="code-container">
+        <div class="code-header">
+          <div class="code-dots"><div class="code-dot"></div><div class="code-dot"></div><div class="code-dot"></div></div>
+          <span>smart_assistant.py</span>
+        </div>
+        <pre><code><span class="keyword">import</span> needle
+<span class="keyword">from</span> typing <span class="keyword">import</span> Literal, Optional, Annotated
+
+<span class="comment"># 1. 以純 Python 裝飾器定義硬體控制工具</span>
+<span class="decorator">@needle.tool</span>
+<span class="keyword">def</span> <span class="fn">control_lights</span>(
+    room: Literal[<span class="str">"kitchen"</span>, <span class="str">"living_room"</span>, <span class="str">"bedroom"</span>],
+    action: Literal[<span class="str">"on"</span>, <span class="str">"off"</span>, <span class="str">"dim"</span>],
+    brightness_percent: Annotated[Optional[<span class="type">int</span>], needle.Field(ge=<span class="num">0</span>, le=<span class="num">100</span>)] = <span class="keyword">None</span>,
+    color: Optional[Literal[<span class="str">"warm white"</span>, <span class="str">"cool white"</span>, <span class="str">"blue"</span>]] = <span class="keyword">None</span>,
+):
+    <span class="str">"""控制指定房間的燈光開關、亮度百分比或顏色。"""</span>
+    <span class="keyword">return</span> {<span class="str">"device"</span>: <span class="str">"light"</span>, <span class="str">"room"</span>: room, <span class="str">"status"</span>: action, <span class="str">"pct"</span>: brightness_percent, <span class="str">"color"</span>: color}
+
+<span class="decorator">@needle.tool</span>
+<span class="keyword">def</span> <span class="fn">start_robot_vacuum</span>(
+    action: Literal[<span class="str">"start"</span>, <span class="str">"stop"</span>, <span class="str">"dock"</span>],
+    target_room: Optional[Literal[<span class="str">"kitchen"</span>, <span class="str">"living_room"</span>, <span class="str">"bedroom"</span>]] = <span class="keyword">None</span>,
+):
+    <span class="str">"""啟動或暫停掃地機器人，或派遣其至特定房間清掃。"""</span>
+    <span class="keyword">return</span> {<span class="str">"device"</span>: <span class="str">"vacuum"</span>, <span class="str">"action"</span>: action, <span class="str">"target"</span>: target_room}
+
+<span class="comment"># 2. 初始化 Needle 端側 Agent</span>
+agent = needle.Needle(
+    tools=[control_lights, start_robot_vacuum],
+    system=<span class="str">"date: 2026-09-19 Sat; device: edge_hub; location: living_room"</span>
+)
+
+<span class="comment"># 3. 執行包含複合指令的自然語言</span>
+user_query = <span class="str">"把客廳燈光調為 35% 暖白光，另外讓掃地機器人去清掃廚房"</span>
+response = agent.run(user_query)
+
+<span class="comment"># 4. 檢視模型輸出結果</span>
+<span class="keyword">print</span>(response[<span class="str">"function_calls"</span>])
+<span class="keyword">print</span>(response[<span class="str">"confidence"</span>])  <span class="comment"># 0.96 (極高置信度)</span>
+<span class="keyword">print</span>(response[<span class="str">"results"</span>])     <span class="comment"># 工具自動執行完畢的返回值</span>
+</code></pre>
+      </div>
+
+      <div class="code-container">
+        <div class="code-header">
+          <div class="code-dots"><div class="code-dot"></div><div class="code-dot"></div><div class="code-dot"></div></div>
+          <span>Execution Output (自動輸出的推論與執行結果)</span>
+        </div>
+        <pre><code>{
+  <span class="str">"type"</span>: <span class="str">"call"</span>,
+  <span class="str">"confidence"</span>: <span class="num">0.96</span>,
+  <span class="str">"reasoning"</span>: <span class="str">"'客廳' -> room living_room; '35%' -> brightness_percent 35; '暖白光' -> color warm white; '掃地機器人' + '廚房' -> start_robot_vacuum target kitchen"</span>,
+  <span class="str">"function_calls"</span>: [
+    {
+      <span class="str">"name"</span>: <span class="str">"control_lights"</span>,
+      <span class="str">"arguments"</span>: {
+        <span class="str">"room"</span>: <span class="str">"living_room"</span>,
+        <span class="str">"action"</span>: <span class="str">"dim"</span>,
+        <span class="str">"brightness_percent"</span>: <span class="num">35</span>,
+        <span class="str">"color"</span>: <span class="str">"warm white"</span>
+      }
+    },
+    {
+      <span class="str">"name"</span>: <span class="str">"start_robot_vacuum"</span>,
+      <span class="str">"arguments"</span>: {
+        <span class="str">"action"</span>: <span class="str">"start"</span>,
+        <span class="str">"target_room"</span>: <span class="str">"kitchen"</span>
+      }
+    }
+  ],
+  <span class="str">"results"</span>: [
+    {<span class="str">"device"</span>: <span class="str">"light"</span>, <span class="str">"room"</span>: <span class="str">"living_room"</span>, <span class="str">"status"</span>: <span class="str">"dim"</span>, <span class="str">"pct"</span>: <span class="num">35</span>, <span class="str">"color"</span>: <span class="str">"warm white"</span>},
+    {<span class="str">"device"</span>: <span class="str">"vacuum"</span>, <span class="str">"action"</span>: <span class="str">"start"</span>, <span class="str">"target"</span>: <span class="str">"kitchen"</span>}
+  ]
+}</code></pre>
+      </div>
+
+      <div class="callout" style="border-left-color: var(--warning);">
+        <div class="callout-title">🛡️ 防幻覺機制：如果用戶提問與工具無關的內容呢？</div>
+        <div class="callout-content">
+          若用戶輸入：「<code>誰是莎士比亞？</code>」<br>
+          一般 LLM 會擅自以自然語言長篇大論或隨意捏造參數。而在 Needle 中，系統直接返回：<br>
+          <code>{"type": "call", "function_calls": [], "confidence": 0.0}</code><br>
+          <strong>主動安全拒絕（Refusal）</strong>，保證物聯網設備不會因模型的幻覺而觸發錯誤動作。
+        </div>
+      </div>
+
+      <h3 style="font-size: 20px; margin-top: 36px; margin-bottom: 12px; color: #fff;">範例 2：離線穿戴設備發票/票據結構化萃取 (Pydantic Extraction)</h3>
+      <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+        無需聯網，利用 <code>needle.extract()</code> 直接在手錶或手機端將 OCR 雜訊轉換為標準 Pydantic 物件：
+      </p>
+
+      <div class="code-container">
+        <div class="code-header">
+          <div class="code-dots"><div class="code-dot"></div><div class="code-dot"></div><div class="code-dot"></div></div>
+          <span>invoice_extraction.py</span>
+        </div>
+        <pre><code><span class="keyword">from</span> pydantic <span class="keyword">import</span> BaseModel
+<span class="keyword">import</span> needle
+
+<span class="keyword">class</span> <span class="type">ExpenseRecord</span>(BaseModel):
+    vendor: <span class="type">str</span>
+    total_amount: <span class="type">float</span>
+    currency: <span class="type">str</span>
+    category: Literal[<span class="str">"meal"</span>, <span class="str">"transport"</span>, <span class="str">"hardware"</span>]
+
+receipt_text = <span class="str">"發票明細：向【超微機器人實驗室】採購舵機零件，總計收取新台幣 $4,200 元整，含運送。"</span>
+
+<span class="comment"># 單行呼叫，毫秒級完成提取</span>
+record = needle.extract(receipt_text, schema=ExpenseRecord)
+
+<span class="keyword">print</span>(record)
+<span class="comment"># 輸出結果: ExpenseRecord(vendor='超微機器人實驗室', total_amount=4200.0, currency='TWD', category='hardware')</span>
+</code></pre>
+      </div>
+
+      <h3 style="font-size: 20px; margin-top: 36px; margin-bottom: 12px; color: #fff;">範例 3：基於置信度門檻的安全決策分級 (Confidence Gating)</h3>
+      <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+        在工業或車載關鍵控制中，可依據 Needle 的 calibrated confidence 分流：
+      </p>
+
+      <div class="code-container">
+        <div class="code-header">
+          <div class="code-dots"><div class="code-dot"></div><div class="code-dot"></div><div class="code-dot"></div></div>
+          <span>safety_routing.py</span>
+        </div>
+        <pre><code>turn = agent.complete(voice_input)
+
+calls = turn[<span class="str">"function_calls"</span>]
+held = turn[<span class="str">"suppressed_calls"</span>]  <span class="comment"># 遭安全門閥扣留的疑似呼叫</span>
+conf = turn[<span class="str">"confidence"</span>]
+
+<span class="keyword">if</span> calls <span class="keyword">and</span> conf >= <span class="num">0.75</span>:
+    execute_actions(calls)                           <span class="comment"># 1. 高置信度：立即自動執行</span>
+<span class="keyword">elif</span> calls <span class="keyword">or</span> held:
+    ask_user_confirmation(calls <span class="keyword">or</span> held, turn[<span class="str">"reasoning"</span>]) <span class="comment"># 2. 中置信度：彈出 UI 詢問用戶確認</span>
+<span class="keyword">else</span>:
+    speak_to_user(<span class="str">"抱歉，我無法處理這個指令或查無對應功能。"</span>)  <span class="comment"># 3. 拒絕：安全提示</span>
+</code></pre>
+      </div>
+    </section>
+
+    <!-- Section 4: Benchmarks & Comparisons -->
+    <section id="benchmarks">
+      <h2 class="section-title"><span class="number">04</span> 基準評測數據 (Benchmarks & Evaluation)</h2>
+      <p class="section-desc">
+        Needle 3 在各項公認的函式調用與語意提取基準測試中，展現了「小模型打大模型」的驚人表現。以手機操作為主的 <strong>Mobile Actions</strong> 與多步驟調用 <strong>DroidCall</strong> 測試中，Needle 3 甚至直逼雲端旗艦 DeepSeek V4 Flash：
+      </p>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>模型名稱</th>
+              <th>參數規模</th>
+              <th>運行型態</th>
+              <th>Mobile Actions (準確率)</th>
+              <th>DroidCall (有序調用)</th>
+              <th>BFCL v4 (AST Match)</th>
+              <th>SNIPS Gold (F1)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="tag-needle">Needle 3 (20L)</span></td>
+              <td><strong>121M (等效50M)</strong></td>
+              <td>端側 (2-bit / 35MB)</td>
+              <td><strong>86.0%</strong></td>
+              <td><strong>47.0%</strong></td>
+              <td>50.2%</td>
+              <td>30.2%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-needle">Needle 3 (16L)</span></td>
+              <td><strong>98M</strong></td>
+              <td>端側 (2-bit / 29MB)</td>
+              <td><strong>80.7%</strong></td>
+              <td>40.0%</td>
+              <td>41.3%</td>
+              <td>23.5%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-needle">Needle 3 (8L)</span></td>
+              <td><strong>52M</strong></td>
+              <td>端側 (2-bit / 15MB)</td>
+              <td>36.8%</td>
+              <td>36.5%</td>
+              <td>28.2%</td>
+              <td>16.6%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-other">DeepSeek V4 Flash</span></td>
+              <td>數百億級 MoE</td>
+              <td>雲端 API</td>
+              <td>88.4%</td>
+              <td>60.5%</td>
+              <td>77.2%</td>
+              <td>69.4%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-other">LFM 2.5</span></td>
+              <td>1.2B (1200M)</td>
+              <td>本地 FP16</td>
+              <td>82.4%</td>
+              <td>35.5%</td>
+              <td>62.0%</td>
+              <td>43.0%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-other">Qwen 3.5</span></td>
+              <td>0.8B (800M)</td>
+              <td>本地 FP16</td>
+              <td>76.0%</td>
+              <td>28.0%</td>
+              <td>56.8%</td>
+              <td>35.0%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-other">FunctionGemma</span></td>
+              <td>270M</td>
+              <td>本地 FP16</td>
+              <td>65.1%</td>
+              <td>16.5%</td>
+              <td>46.6%</td>
+              <td>29.0%</td>
+            </tr>
+            <tr>
+              <td><span class="tag-other">Apple FM</span></td>
+              <td>3.0B (3000M)</td>
+              <td>本地端側</td>
+              <td>57.6%</td>
+              <td>-</td>
+              <td>-</td>
+              <td>-</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="media-card">
+        <img src="assets/benchmarks.svg" alt="Needle 3 Benchmarks">
+        <div class="media-caption">▲ 圖 2：Needle 3 在 6 大基準測試中與其他端側小模型（LFM、Qwen、FunctionGemma）及雲端模型的精確度比較</div>
+      </div>
+
+      <!-- Fine-Tuning Impact -->
+      <h3 style="font-size: 20px; margin-top: 36px; margin-bottom: 12px; color: #fff;">微調潛力：4 層 29M 子網路微調即可超越 DeepSeek</h3>
+      <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+        Needle 的階梯式架構極具客製化潛力。透過內建的 <code>needle finetune</code> 指令訓練 LoRA 適配器後，模型各子網路在垂直領域的準確度獲得 18 ~ 36 個百分點的飛躍提升：
+      </p>
+
+      <div class="media-card">
+        <img src="assets/finetune.svg" alt="Needle 3 Fine-Tuning Improvements">
+        <div class="media-caption">▲ 圖 3：在 DroidCall 與 Mobile Actions 資料集上微調後的準確率躍升（4L 29M 即可擊敗 DeepSeek V4 Flash）</div>
+      </div>
+    </section>
+
+    <!-- Section 5: Cross-Platform Deployment -->
+    <section id="deployment">
+      <h2 class="section-title"><span class="number">05</span> 跨平臺邊緣部署生態 (Deployment & Ecosystem)</h2>
+      <p class="section-desc">
+        Needle 官方發行了支援 <strong>13 個平臺目錄</strong> 的原生執行檔與 C 靜態庫 (<code>libneedle.a</code> / <code>needle.h</code>)，體積均小於 1 MB，不需要任何 Python 或深度學習環境即可在裸機運行：
+      </p>
+
+      <div class="platform-tags">
+        <div class="platform-pill"><span class="os">macOS</span> arm64</div>
+        <div class="platform-pill"><span class="os">Linux</span> x86_64</div>
+        <div class="platform-pill"><span class="os">Linux</span> arm64 (樹莓派)</div>
+        <div class="platform-pill"><span class="os">Linux</span> armv7 (32-bit)</div>
+        <div class="platform-pill"><span class="os">Linux</span> riscv64</div>
+        <div class="platform-pill"><span class="os">Linux</span> mipsel (路由器/攝影機)</div>
+        <div class="platform-pill"><span class="os">Windows</span> x86_64 / arm64</div>
+        <div class="platform-pill"><span class="os">Android</span> arm64 / armv7 / riscv</div>
+        <div class="platform-pill"><span class="os">iOS</span> arm64 / 模擬器</div>
+        <div class="platform-pill"><span class="os">watchOS</span> tvOS arm64</div>
+        <div class="platform-pill"><span class="os">Web</span> wasm (瀏覽器/Node)</div>
+        <div class="platform-pill"><span class="os">WASI</span> wasm-component (WIT)</div>
+      </div>
+
+      <div class="media-card">
+        <img src="assets/deploy.svg" alt="Needle 3 Deploy Platforms">
+        <div class="media-caption">▲ 圖 4：Needle 3 提供 13 種平臺引擎，全數共用同一份標準 <code>needle3.cact</code> 權重</div>
+      </div>
+
+      <div class="code-container">
+        <div class="code-header">
+          <div class="code-dots"><div class="code-dot"></div><div class="code-dot"></div><div class="code-dot"></div></div>
+          <span>CLI 部署指令示範</span>
+        </div>
+        <pre><code><span class="comment"># 為樹莓派 (Raspberry Pi) 下載 8 層 (52M) 的輕量化套件</span>
+$ needle build --platform linux-arm64 --layers <span class="num">8</span> --out ./pi_bundle
+
+<span class="comment"># 在 Mac 上直接作為本機守護程序啟動，對外提供 HTTP/RPC 服務</span>
+$ ./macos-arm64/needle --model needle3.cact --tools tools.json --serve --port <span class="num">8080</span>
+
+<span class="comment"># 本地啟動視覺化 Playground 互動介面</span>
+$ needle playground
+</code></pre>
+      </div>
+    </section>
+
+    <!-- Section 6: Summary & Value Evaluation -->
+    <section>
+      <h2 class="section-title"><span class="number">06</span> 總結與價值評估 (Executive Takeaways)</h2>
+      <div class="features-grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));">
+        <div class="feature-box">
+          <h3 style="color: var(--success);">🏆 真正的端側可用性</h3>
+          <p>傳統 7B、3B 模型即使量化到 4-bit 也需要 2~4 GB 記憶體，發熱嚴重且耗電巨大。Needle 僅需 <strong>8 ~ 29 MB</strong> 記憶體，可在穿戴設備或百元級微控制器上長駐運作。</p>
+        </div>
+        <div class="feature-box">
+          <h3 style="color: var(--info);">🔒 100% 離線與資料隱私</h3>
+          <p>醫療器材、智慧車輛、居家隱私攝影機等對數據安全要求嚴苛的場景，無需聯網、零遙測外洩風險（支援 <code>NEEDLE_TELEMETRY=0</code> 完全離線斷網）。</p>
+        </div>
+        <div class="feature-box">
+          <h3 style="color: var(--warning);">⚡ 工業級的確定性</h3>
+          <p>解碼階段語法嚴格約束 + 置信度校準，杜絕了「隨機幻覺」破壞下游硬體指令的致命風險，是目前工業物聯網與邊緣 Agent 的最佳選擇。</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>基於 <a href="https://github.com/Child-pi/needle" target="_blank">Child-pi/needle</a> (Cactus Compute) 深度架構分析產出 · 2026</p>
+      <p style="margin-top: 6px; font-size: 12px; color: #4a4844;">專案授權：Apache 2.0 · 權重託管：Hugging Face (Cactus-Compute/needle3)</p>
+    </div>
+  </footer>
+
+</body>
+</html>

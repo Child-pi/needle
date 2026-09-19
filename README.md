@@ -6,6 +6,8 @@ A foundation model for mobiles, wearables, robots, smart home, automotive and mi
 - **Structured extraction**: declare a shape, hand over messy text, get typed fields back: an invoice, a booking, a notification, a form. The decode grammar guarantees the output parses, and extraction generalises to classification.
 - **Text embedding**: the same model returns a vector for a sentence, so an app can search, match and route locally.
 
+> 📊 **完整研究報告 (Comprehensive Technical Report)**：請參閱 [report.html](report.html) 查看圖文並茂的技術架構深度解析、實作範例與基準評測。
+
 ![Needle 3 at a glance](assets/model.svg)
 
 Needle 3 is a Laddered Simple Attention Network: a Monarch Hadamard MLP in place of the FFN, GQA attention with causal conv taps, engram n-gram memory read by gather, and multi-lane hyper-connections, trained so that every depth from 2 to 20 layers is a deployable model. Most of its parameters sit in the engram, so the 121M model does the arithmetic of a 50M one. A byte-level grammar compiled from your schemas constrains every token, and every response carries a calibrated confidence score from a learned head. The architecture diagram is on the [release page](https://cactuscompute.com/needle).
