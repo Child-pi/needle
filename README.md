@@ -6,7 +6,8 @@ A foundation model for mobiles, wearables, robots, smart home, automotive and mi
 - **Structured extraction**: declare a shape, hand over messy text, get typed fields back: an invoice, a booking, a notification, a form. The decode grammar guarantees the output parses, and extraction generalises to classification.
 - **Text embedding**: the same model returns a vector for a sentence, so an app can search, match and route locally.
 
-> 📊 **完整研究報告 (Comprehensive Technical Report)**：請參閱 [report.html](report.html) 查看圖文並茂的技術架構深度解析、實作範例與基準評測。
+> 📊 **完整研究報告 (Comprehensive Technical Report)**：請參閱 [report.html](report.html) 查看圖文並茂的技術架構深度解析、實作範例與基準評測。  
+> 🚀 **Google Colab 互動式教學範例**：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/needle/blob/main/needle_tutorial.ipynb) 點擊直接在瀏覽器零配置執行實作範例！
 
 ![Needle 3 at a glance](assets/model.svg)
 
