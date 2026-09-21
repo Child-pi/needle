@@ -58,8 +58,17 @@ python needle/pytorch/run_example.py
 
 ---
 
-## 📓 Google Colab 雲端實驗筆記本
+## 📓 Google Colab 雲端實驗與互動沙盒筆記本
 
-點擊下方按鈕即可在 Google Colab 上免安裝環境直接執行：
+我們為您提供了兩份互動式筆記本：
+
+### 1. 🌲 官方同款互動沙盒 (Playground Demo - 類似 cactuscompute.com/needle)
+內嵌 Web UI 互動介面，可點擊預設情境（智慧家居、音樂、手錶）、輸入指令並即時檢視 JSON 輸出、置信度與底層張量：
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/needle/blob/pytorch_experiment/needle_pytorch_playground.ipynb)
+
+### 2. 🔬 PyTorch 模型架構深度實作 (Architecture Lab)
+專注於 PyTorch 代碼層級的前向推論、自回歸生成、反向傳播梯度與 AdamW 優化器驗證：
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/needle/blob/pytorch_experiment/pytorch_experiment.ipynb)
+
