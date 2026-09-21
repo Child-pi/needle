@@ -72,3 +72,9 @@ python needle/pytorch/run_example.py
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/needle/blob/pytorch_experiment/pytorch_experiment.ipynb)
 
+### 3. ⚡ TensorFlow Lite for Microcontrollers (TFLM) 邊緣推論沙盒
+展示 PyTorch 轉 TFLite、INT8 全整數量化、導出 C 標頭檔 (`xxd`) 與 TFLM 靜態記憶體池 (Tensor Arena) 邊緣遙測沙盒：
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/needle/blob/pytorch_experiment/needle_tflm_playground.ipynb)
+
+
